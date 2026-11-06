@@ -1,0 +1,46 @@
+{
+  "schema": "x0k.provenance/v1",
+  "publication_uri": "x0k:publication/x0k-release-metadata",
+  "corpus_rev": "uwkkttxowxxusmmpsvzyuosytoomuyvq",
+  "corpus_commit": "6e3d2b5c60f8e399760c35d0c488bb39db0acb1d",
+  "path_map": {
+    "decisions/architecture/delivery/release-metadata.md": "corpora/x0k/decisions/architecture/delivery/release-metadata.md",
+    "implementation/release-metadata/ceremony.md": "corpora/x0k/implementation/release-metadata/ceremony.md",
+    "implementation/release-metadata/hardware-kit.md": "corpora/x0k/implementation/release-metadata/hardware-kit.md",
+    "implementation/release-metadata/release-metadata.md": "corpora/x0k/implementation/release-metadata/release-metadata.md",
+    "implementation/release-metadata/vectors.md": "corpora/x0k/implementation/release-metadata/vectors.md"
+  },
+  "link_rewrites": [],
+  "crates": [
+    "x0k-release-metadata"
+  ],
+  "excluded": [],
+  "excluded_docs": [],
+  "literate_docs": [
+    "implementation/release-metadata/ceremony.md",
+    "implementation/release-metadata/hardware-kit.md",
+    "implementation/release-metadata/release-metadata.md",
+    "implementation/release-metadata/vectors.md"
+  ],
+  "overlay": [],
+  "dropped_generated": [],
+  "severed": [],
+  "documents": {
+    "x0k:architecture/release-metadata": "decisions/architecture/delivery/release-metadata.md"
+  },
+  "modules": [],
+  "modules_dir": null,
+  "module_version": null,
+  "module_version_source": null,
+  "proofs": {},
+  "proofs_run": true,
+  "prebuilt": null,
+  "license_applied": "MIT",
+  "license_source": "publication-doc",
+  "relicensed_from": {
+    "note": "What each crate's manifest declared in the private source tree this projection was taken from. Historical record of the relicense act, not this repository's terms: those are `license_applied` above and the LICENSE-* files beside this record.",
+    "declared": {
+      "x0k-release-metadata": "MIT"
+    }
+  }
+}

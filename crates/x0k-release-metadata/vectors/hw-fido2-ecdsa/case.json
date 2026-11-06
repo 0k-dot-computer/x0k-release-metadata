@@ -1,0 +1,17 @@
+{
+  "decision": "§3",
+  "claim": "A FIDO2 token's sk-ecdsa-sha2-nistp256 signature, made by the token with a touch, counts for a signatory whose rule demands the touch.",
+  "now": "2026-11-05T00:00:00Z",
+  "target": {
+    "path": "fleet/chariot-1.0.tar",
+    "length": 12,
+    "hashes": {
+      "sha256": "529562fc496d2dee4d817e3c494918eaff77a1222f23f152bb3bb65141520451"
+    }
+  },
+  "expect": {
+    "verified": {
+      "role": "fleet"
+    }
+  }
+}

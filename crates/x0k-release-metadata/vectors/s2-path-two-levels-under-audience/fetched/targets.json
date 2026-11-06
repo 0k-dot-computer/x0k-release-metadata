@@ -1,0 +1,86 @@
+{
+  "signed": {
+    "_type": "targets",
+    "spec_version": "1.0.37",
+    "version": 1,
+    "expires": "2030-01-01T00:00:00Z",
+    "targets": {},
+    "delegations": {
+      "keys": {
+        "f6c9e395453b40ec22da6fb07a8b424f38c4363c33fdcff62eda5b7588af66bf": {
+          "keytype": "ed25519",
+          "scheme": "ed25519",
+          "keyval": {
+            "public": "20828bf5c5bdcacb684863336c202fb5599da48be5596615742170705beca9f7"
+          },
+          "x-release-metadata-signatory": "alice",
+          "x-release-metadata-custody": "software"
+        },
+        "30420e81b8becb5af20443b713e0248879d3960fc8b1636d33670ebbfc7db8bb": {
+          "keytype": "ed25519",
+          "scheme": "ed25519",
+          "keyval": {
+            "public": "d54207da194977dcf46adbfec2bc2e75b52d5a8a42184fedfdc00024f0e3e8da"
+          },
+          "x-release-metadata-signatory": "alice",
+          "x-release-metadata-custody": "fido2"
+        },
+        "3251121d2a5c1d37c30e115d844d2904aa4d7c016eca2ad945775cbb55ea121e": {
+          "keytype": "ed25519",
+          "scheme": "ed25519",
+          "keyval": {
+            "public": "511c34a1a2cb521df16bb246b8de8e7997ce235c7e76b22a3d7503a24819dd8a"
+          },
+          "x-release-metadata-signatory": "bob",
+          "x-release-metadata-custody": "secure-enclave"
+        },
+        "b3d7fb720a30715d527368d548cb31ef4ecd24db31d8749370f335cd3fd1254e": {
+          "keytype": "ssh-ed25519",
+          "scheme": "sshsig-ssh-ed25519",
+          "keyval": {
+            "public": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDHevlXTfHInaLE3ExyqYIcICy4LYLlL14XRRXXPpJi8"
+          },
+          "x-release-metadata-signatory": "carol",
+          "x-release-metadata-custody": "software"
+        }
+      },
+      "roles": [
+        {
+          "name": "fleet",
+          "keyids": [
+            "f6c9e395453b40ec22da6fb07a8b424f38c4363c33fdcff62eda5b7588af66bf",
+            "30420e81b8becb5af20443b713e0248879d3960fc8b1636d33670ebbfc7db8bb",
+            "3251121d2a5c1d37c30e115d844d2904aa4d7c016eca2ad945775cbb55ea121e",
+            "b3d7fb720a30715d527368d548cb31ef4ecd24db31d8749370f335cd3fd1254e"
+          ],
+          "threshold": 1,
+          "terminating": true,
+          "paths": [
+            "fleet/*",
+            "fleet/*/*"
+          ]
+        },
+        {
+          "name": "pilot",
+          "keyids": [
+            "f6c9e395453b40ec22da6fb07a8b424f38c4363c33fdcff62eda5b7588af66bf",
+            "30420e81b8becb5af20443b713e0248879d3960fc8b1636d33670ebbfc7db8bb",
+            "3251121d2a5c1d37c30e115d844d2904aa4d7c016eca2ad945775cbb55ea121e",
+            "b3d7fb720a30715d527368d548cb31ef4ecd24db31d8749370f335cd3fd1254e"
+          ],
+          "threshold": 1,
+          "terminating": true,
+          "paths": [
+            "pilot/*"
+          ]
+        }
+      ]
+    }
+  },
+  "signatures": [
+    {
+      "keyid": "f6c9e395453b40ec22da6fb07a8b424f38c4363c33fdcff62eda5b7588af66bf",
+      "sig": "b346518116077e0fd90c808bbea7fb71d16af5df58758f1803144b344f4fe4a62ff04a9c885bae584e28364a2f32e467308c8227e99d4c350214c0f83783ad0c"
+    }
+  ]
+}

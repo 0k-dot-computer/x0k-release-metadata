@@ -1,0 +1,18 @@
+{
+  "decision": "§8",
+  "claim": "A target for another version is refused, even when the session key signs it.",
+  "now": "2026-11-05T00:00:00Z",
+  "target": {
+    "path": "fleet/chariot-1.2-x86_64-linux.tar",
+    "length": 12,
+    "hashes": {
+      "sha256": "529562fc496d2dee4d817e3c494918eaff77a1222f23f152bb3bb65141520451"
+    }
+  },
+  "expect": {
+    "refused": {
+      "role": "targets",
+      "rule": "unknown-target"
+    }
+  }
+}

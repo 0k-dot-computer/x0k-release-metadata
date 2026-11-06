@@ -1,0 +1,59 @@
+{
+  "signed": {
+    "_type": "targets",
+    "spec_version": "1.0.37",
+    "version": 1,
+    "expires": "2030-01-01T00:00:00Z",
+    "targets": {},
+    "delegations": {
+      "keys": {
+        "a303a72316a605f7b653e8403253f265a650c24df098ebd34a181437990979d9": {
+          "keytype": "ed25519",
+          "scheme": "ed25519",
+          "keyval": {
+            "public": "acdb0e29743f0ccb8686d0a104cb96e05abefec1538765e7595869f7dc8c49aa"
+          }
+        },
+        "38b5d67cefed772dbc208735798db4bb252ce2c79711fe16106e0585001d430f": {
+          "keytype": "ed25519",
+          "scheme": "ed25519",
+          "keyval": {
+            "public": "43046bfe4092b3e94994eada15dcc20d8aaa07b658fd3954eb8e0efb8bdca5de"
+          }
+        }
+      },
+      "roles": [
+        {
+          "name": "fleet",
+          "keyids": [
+            "a303a72316a605f7b653e8403253f265a650c24df098ebd34a181437990979d9",
+            "38b5d67cefed772dbc208735798db4bb252ce2c79711fe16106e0585001d430f"
+          ],
+          "threshold": 2,
+          "terminating": true,
+          "paths": [
+            "fleet/*"
+          ]
+        },
+        {
+          "name": "pilot",
+          "keyids": [
+            "a303a72316a605f7b653e8403253f265a650c24df098ebd34a181437990979d9",
+            "38b5d67cefed772dbc208735798db4bb252ce2c79711fe16106e0585001d430f"
+          ],
+          "threshold": 1,
+          "terminating": true,
+          "paths": [
+            "pilot/*"
+          ]
+        }
+      ]
+    }
+  },
+  "signatures": [
+    {
+      "keyid": "f6c9e395453b40ec22da6fb07a8b424f38c4363c33fdcff62eda5b7588af66bf",
+      "sig": "2147c31785dbbefd1d9fac50db86dac9528db71719588cc784d74158166f89afe140c068e77128a7ef2b99ca517ad8b7cc672460278bce6e816df055f05bd904"
+    }
+  ]
+}

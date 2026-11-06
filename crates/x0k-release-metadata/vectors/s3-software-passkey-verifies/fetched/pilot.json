@@ -1,0 +1,15 @@
+{
+  "signed": {
+    "_type": "targets",
+    "spec_version": "1.0.37",
+    "version": 1,
+    "expires": "2030-01-01T00:00:00Z",
+    "targets": {}
+  },
+  "signatures": [
+    {
+      "keyid": "f6c9e395453b40ec22da6fb07a8b424f38c4363c33fdcff62eda5b7588af66bf",
+      "sig": "bbad09564e3594ad395758b8a0f19f4588502764e31633b5f9f33e13b66568c08a7c522b06872613c974cfb67bbb372494a8dbe6aa44feca58239c97bc264903"
+    }
+  ]
+}

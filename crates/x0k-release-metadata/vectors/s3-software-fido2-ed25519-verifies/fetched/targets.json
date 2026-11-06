@@ -1,0 +1,52 @@
+{
+  "signed": {
+    "_type": "targets",
+    "spec_version": "1.0.37",
+    "version": 1,
+    "expires": "2030-01-01T00:00:00Z",
+    "targets": {},
+    "delegations": {
+      "keys": {
+        "00a3d534c82bf480d2423108861ce4b3407bd8749052f598223f7ef0ff1a83eb": {
+          "keytype": "sk-ssh-ed25519@openssh.com",
+          "scheme": "sshsig-sk-ssh-ed25519",
+          "keyval": {
+            "public": "sk-ssh-ed25519@openssh.com AAAAGnNrLXNzaC1lZDI1NTE5QG9wZW5zc2guY29tAAAAIBfLefsrQSDysexl5BmNbgiyjoE/6wHkpACDm4XhgIDOAAAABHNzaDo="
+          },
+          "x-release-metadata-signatory": "dave",
+          "x-release-metadata-custody": "fido2"
+        }
+      },
+      "roles": [
+        {
+          "name": "fleet",
+          "keyids": [
+            "00a3d534c82bf480d2423108861ce4b3407bd8749052f598223f7ef0ff1a83eb"
+          ],
+          "threshold": 1,
+          "terminating": true,
+          "paths": [
+            "fleet/*"
+          ]
+        },
+        {
+          "name": "pilot",
+          "keyids": [
+            "00a3d534c82bf480d2423108861ce4b3407bd8749052f598223f7ef0ff1a83eb"
+          ],
+          "threshold": 1,
+          "terminating": true,
+          "paths": [
+            "pilot/*"
+          ]
+        }
+      ]
+    }
+  },
+  "signatures": [
+    {
+      "keyid": "f6c9e395453b40ec22da6fb07a8b424f38c4363c33fdcff62eda5b7588af66bf",
+      "sig": "37229a69ae4c92a095b6e11ab7f3582b26a75400b6c94a02f43fb4df716bd8c0839025f98f0875e092013db9ecea36587a322734de944d1119f88f94efce370d"
+    }
+  ]
+}

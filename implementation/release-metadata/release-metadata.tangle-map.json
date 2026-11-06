@@ -1,0 +1,53 @@
+{
+  "source": "implementation/release-metadata/release-metadata.md",
+  "source_hash": "b95da02851914b12",
+  "pipelines": [
+    {
+      "kind": "identity-tangle",
+      "input_hashes": {},
+      "config_hash": "c131fc92fbd716d6",
+      "outputs": [
+        {
+          "path": "crates/x0k-release-metadata/src/lib.rs",
+          "hash": "29b269aef91b38d2"
+        },
+        {
+          "path": "crates/x0k-release-metadata/src/refusal.rs",
+          "hash": "adad13baed0de541"
+        },
+        {
+          "path": "crates/x0k-release-metadata/src/canonical.rs",
+          "hash": "06dc387f7bb364b6"
+        },
+        {
+          "path": "crates/x0k-release-metadata/src/metadata.rs",
+          "hash": "f0f1feb7f79ca07a"
+        },
+        {
+          "path": "crates/x0k-release-metadata/src/time.rs",
+          "hash": "a26ac784e75ff957"
+        },
+        {
+          "path": "crates/x0k-release-metadata/src/scheme.rs",
+          "hash": "2c78bec94cded13a"
+        },
+        {
+          "path": "crates/x0k-release-metadata/src/quorum.rs",
+          "hash": "190d756f1ab9cd6d"
+        },
+        {
+          "path": "crates/x0k-release-metadata/src/verify.rs",
+          "hash": "92f97f44a25fe848"
+        },
+        {
+          "path": "crates/x0k-release-metadata/Cargo.toml",
+          "hash": "b7c1fd9de82f5647"
+        },
+        {
+          "path": "crates/x0k-release-metadata/tests/conformance/purity.rs",
+          "hash": "d6e4ec2502d72fed"
+        }
+      ]
+    }
+  ]
+}

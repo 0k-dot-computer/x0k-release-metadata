@@ -1,0 +1,41 @@
+{
+  "signed": {
+    "_type": "targets",
+    "spec_version": "1.0.37",
+    "version": 1,
+    "expires": "2030-01-01T00:00:00Z",
+    "targets": {},
+    "delegations": {
+      "keys": {
+        "2ad76fa186284c2e73f899f104ef5333c3373f400002ec7a1f5285dee3fca19d": {
+          "keytype": "sk-ssh-ed25519@openssh.com",
+          "scheme": "sshsig-sk-ssh-ed25519",
+          "keyval": {
+            "public": "sk-ssh-ed25519@openssh.com AAAAGnNrLXNzaC1lZDI1NTE5QG9wZW5zc2guY29tAAAAIFISYq0qdChsdEgv1u5/w2J5rMKduD/Fm+cnZT/IF2n2AAAABHNzaDo="
+          },
+          "x-release-metadata-signatory": "operator",
+          "x-release-metadata-custody": "fido2"
+        }
+      },
+      "roles": [
+        {
+          "name": "fleet",
+          "keyids": [
+            "2ad76fa186284c2e73f899f104ef5333c3373f400002ec7a1f5285dee3fca19d"
+          ],
+          "threshold": 1,
+          "terminating": true,
+          "paths": [
+            "fleet/*"
+          ]
+        }
+      ]
+    }
+  },
+  "signatures": [
+    {
+      "keyid": "beb99376effe9939ecdd3f06e45ab4236afcf876159e5b3463e5a0cd85c3d271",
+      "sig": "7f9742a8f9e4d5009aa471676513dac40df0908d88bac17535e130dd3f7cd15908abb2c55cdc9a8526a8e69042638f628105e1909bb907815467187ee3607607"
+    }
+  ]
+}

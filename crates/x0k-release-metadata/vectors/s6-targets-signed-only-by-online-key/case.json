@@ -1,0 +1,18 @@
+{
+  "decision": "§6",
+  "claim": "Targets metadata that only the online key signed is refused: the key on the build server signs freshness, never a release.",
+  "now": "2026-11-05T00:00:00Z",
+  "target": {
+    "path": "fleet/chariot-1.0.tar",
+    "length": 12,
+    "hashes": {
+      "sha256": "529562fc496d2dee4d817e3c494918eaff77a1222f23f152bb3bb65141520451"
+    }
+  },
+  "expect": {
+    "refused": {
+      "role": "targets",
+      "rule": "threshold"
+    }
+  }
+}

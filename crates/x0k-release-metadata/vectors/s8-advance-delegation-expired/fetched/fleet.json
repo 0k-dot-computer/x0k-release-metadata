@@ -1,0 +1,41 @@
+{
+  "signed": {
+    "_type": "targets",
+    "spec_version": "1.0.37",
+    "version": 1,
+    "expires": "2026-11-04T12:00:00Z",
+    "targets": {},
+    "delegations": {
+      "keys": {
+        "88e5b1ea9020d056c202346b56963d6a1b0ae4e0689f138ac80a87c2a6a81a06": {
+          "keytype": "ed25519",
+          "scheme": "ed25519",
+          "keyval": {
+            "public": "e92eb6054fe9bc682a1bcf3b759f65ab38a4cfbd81c4d1f3342e4cc9cded8b0b"
+          },
+          "x-release-metadata-signatory": "session",
+          "x-release-metadata-custody": "software"
+        }
+      },
+      "roles": [
+        {
+          "name": "chariot-1.1",
+          "keyids": [
+            "88e5b1ea9020d056c202346b56963d6a1b0ae4e0689f138ac80a87c2a6a81a06"
+          ],
+          "threshold": 1,
+          "terminating": true,
+          "paths": [
+            "fleet/chariot-1.1-*"
+          ]
+        }
+      ]
+    }
+  },
+  "signatures": [
+    {
+      "keyid": "f6c9e395453b40ec22da6fb07a8b424f38c4363c33fdcff62eda5b7588af66bf",
+      "sig": "11a8a3f010271453cc14c9203c1edce2d52192cbbf13c412979baebd52f7194d1be3e3200d56592b7370b2a819ce7b9725f7f1ac4e4e6455e5c8b34c707a770a"
+    }
+  ]
+}

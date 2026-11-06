@@ -1,0 +1,18 @@
+{
+  "decision": "§4",
+  "claim": "A root that lists one Ed25519 key in TUF's hex form and again as an SSH key line is refused.",
+  "now": "2026-11-05T00:00:00Z",
+  "target": {
+    "path": "fleet/chariot-1.0.tar",
+    "length": 12,
+    "hashes": {
+      "sha256": "529562fc496d2dee4d817e3c494918eaff77a1222f23f152bb3bb65141520451"
+    }
+  },
+  "expect": {
+    "refused": {
+      "role": "root",
+      "rule": "malformed"
+    }
+  }
+}

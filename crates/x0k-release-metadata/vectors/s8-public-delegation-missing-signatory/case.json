@@ -1,0 +1,18 @@
+{
+  "decision": "§8",
+  "claim": "A delegation for an audience the root marks public, signed by two of its role's three signatories, is refused.",
+  "now": "2026-11-05T00:00:00Z",
+  "target": {
+    "path": "public/chariot-1.1-x86_64-linux.tar",
+    "length": 12,
+    "hashes": {
+      "sha256": "529562fc496d2dee4d817e3c494918eaff77a1222f23f152bb3bb65141520451"
+    }
+  },
+  "expect": {
+    "refused": {
+      "role": "public",
+      "rule": "public-delegation"
+    }
+  }
+}

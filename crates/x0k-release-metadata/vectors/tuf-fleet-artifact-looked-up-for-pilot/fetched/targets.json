@@ -1,0 +1,63 @@
+{
+  "signed": {
+    "_type": "targets",
+    "spec_version": "1.0.37",
+    "version": 1,
+    "expires": "2030-01-01T00:00:00Z",
+    "targets": {},
+    "delegations": {
+      "keys": {
+        "f6c9e395453b40ec22da6fb07a8b424f38c4363c33fdcff62eda5b7588af66bf": {
+          "keytype": "ed25519",
+          "scheme": "ed25519",
+          "keyval": {
+            "public": "20828bf5c5bdcacb684863336c202fb5599da48be5596615742170705beca9f7"
+          },
+          "x-release-metadata-signatory": "alice",
+          "x-release-metadata-custody": "software"
+        },
+        "3251121d2a5c1d37c30e115d844d2904aa4d7c016eca2ad945775cbb55ea121e": {
+          "keytype": "ed25519",
+          "scheme": "ed25519",
+          "keyval": {
+            "public": "511c34a1a2cb521df16bb246b8de8e7997ce235c7e76b22a3d7503a24819dd8a"
+          },
+          "x-release-metadata-signatory": "bob",
+          "x-release-metadata-custody": "secure-enclave"
+        }
+      },
+      "roles": [
+        {
+          "name": "fleet",
+          "keyids": [
+            "f6c9e395453b40ec22da6fb07a8b424f38c4363c33fdcff62eda5b7588af66bf",
+            "3251121d2a5c1d37c30e115d844d2904aa4d7c016eca2ad945775cbb55ea121e"
+          ],
+          "threshold": 1,
+          "terminating": true,
+          "paths": [
+            "fleet/*"
+          ]
+        },
+        {
+          "name": "pilot",
+          "keyids": [
+            "f6c9e395453b40ec22da6fb07a8b424f38c4363c33fdcff62eda5b7588af66bf",
+            "3251121d2a5c1d37c30e115d844d2904aa4d7c016eca2ad945775cbb55ea121e"
+          ],
+          "threshold": 1,
+          "terminating": true,
+          "paths": [
+            "pilot/*"
+          ]
+        }
+      ]
+    }
+  },
+  "signatures": [
+    {
+      "keyid": "f6c9e395453b40ec22da6fb07a8b424f38c4363c33fdcff62eda5b7588af66bf",
+      "sig": "1651271f02f42a23da33c11ad9366fc53fd73ce20f66a144a03434232ebd7c72b44cd9b5871d92c545aa27ea3f3f67b62c4140b6dbc0d321a8c9eb21c871db0b"
+    }
+  ]
+}

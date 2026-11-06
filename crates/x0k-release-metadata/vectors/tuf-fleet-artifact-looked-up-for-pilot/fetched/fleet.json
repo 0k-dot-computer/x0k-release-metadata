@@ -1,0 +1,30 @@
+{
+  "signed": {
+    "_type": "targets",
+    "spec_version": "1.0.37",
+    "version": 1,
+    "expires": "2030-01-01T00:00:00Z",
+    "targets": {
+      "fleet/chariot-1.0.tar": {
+        "length": 12,
+        "hashes": {
+          "sha256": "529562fc496d2dee4d817e3c494918eaff77a1222f23f152bb3bb65141520451",
+          "sha512": "8e756c994c7e09320d5417e2229f470e209de6317cb16502f173e980ff9359a89dacb34349e39aafede7e490e70fb2d4ecc401e10058f402f045424ce8c7b4ce"
+        }
+      },
+      "pilot/chariot-1.0.tar": {
+        "length": 12,
+        "hashes": {
+          "sha256": "529562fc496d2dee4d817e3c494918eaff77a1222f23f152bb3bb65141520451",
+          "sha512": "8e756c994c7e09320d5417e2229f470e209de6317cb16502f173e980ff9359a89dacb34349e39aafede7e490e70fb2d4ecc401e10058f402f045424ce8c7b4ce"
+        }
+      }
+    }
+  },
+  "signatures": [
+    {
+      "keyid": "f6c9e395453b40ec22da6fb07a8b424f38c4363c33fdcff62eda5b7588af66bf",
+      "sig": "8fe66316d003c9b2b5e33d05727918d613ff22131a1cd8d588ab1cbe37f2fc5db7d3ec4c45c5bcc85970ab05109c87a1c730c319e3aef13eee9fd4fe08f18601"
+    }
+  ]
+}

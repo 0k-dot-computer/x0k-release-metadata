@@ -1,0 +1,37 @@
+{
+  "source": "implementation/release-metadata/vectors.md",
+  "source_hash": "1c90405f733dc92b",
+  "pipelines": [
+    {
+      "kind": "identity-tangle",
+      "input_hashes": {},
+      "config_hash": "66867f84f472d72e",
+      "outputs": [
+        {
+          "path": "crates/x0k-release-metadata/tests/conformance/main.rs",
+          "hash": "f335cd5db89bc0c2"
+        },
+        {
+          "path": "crates/x0k-release-metadata/tests/conformance/vectors.rs",
+          "hash": "be6e616c18d6ddc1"
+        },
+        {
+          "path": "crates/x0k-release-metadata/examples/make_vectors.rs",
+          "hash": "6c583dc3b9c42aa1"
+        },
+        {
+          "path": "crates/x0k-release-metadata/interop/tuf_client_verdicts.py",
+          "hash": "d4d4c61fa17e31b3"
+        },
+        {
+          "path": "crates/x0k-release-metadata/interop/go-tuf/main.go",
+          "hash": "96ec9e2ec3b68d17"
+        },
+        {
+          "path": "crates/x0k-release-metadata/interop/run.sh",
+          "hash": "b0a65d775dff8817"
+        }
+      ]
+    }
+  ]
+}

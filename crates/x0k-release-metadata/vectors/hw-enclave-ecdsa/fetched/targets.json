@@ -1,0 +1,41 @@
+{
+  "signed": {
+    "_type": "targets",
+    "spec_version": "1.0.37",
+    "version": 1,
+    "expires": "2030-01-01T00:00:00Z",
+    "targets": {},
+    "delegations": {
+      "keys": {
+        "97ac5bdf6cc3311ce2bc7e063a275fae3de265f614053edef488d9d5840c0e3b": {
+          "keytype": "ecdsa-sha2-nistp256",
+          "scheme": "sshsig-ecdsa-sha2-nistp256",
+          "keyval": {
+            "public": "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBOjg81ndFjKrsSv0KhB11CAygxcKz5M63El5v4EHs8e7Kit1mkBx8cny+f/JTWbamQXxb/bZktFuySs5+zTnNrg="
+          },
+          "x-release-metadata-signatory": "operator",
+          "x-release-metadata-custody": "secure-enclave"
+        }
+      },
+      "roles": [
+        {
+          "name": "fleet",
+          "keyids": [
+            "97ac5bdf6cc3311ce2bc7e063a275fae3de265f614053edef488d9d5840c0e3b"
+          ],
+          "threshold": 1,
+          "terminating": true,
+          "paths": [
+            "fleet/*"
+          ]
+        }
+      ]
+    }
+  },
+  "signatures": [
+    {
+      "keyid": "beb99376effe9939ecdd3f06e45ab4236afcf876159e5b3463e5a0cd85c3d271",
+      "sig": "d67e2b159e6e09fab3a8fdd22f2f89ec49423fea07bb00f0d3102cea80f81d83c70fb9fa5e4322c7847e35de9252d1ef45d804689172fa7ff126feca89b53509"
+    }
+  ]
+}

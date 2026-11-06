@@ -1,0 +1,115 @@
+{
+  "signed": {
+    "_type": "root",
+    "spec_version": "1.0.37",
+    "consistent_snapshot": false,
+    "version": 2,
+    "expires": "2030-01-01T00:00:00Z",
+    "keys": {
+      "ecc4c378ac82e4fb0be86e9c9cd2e5a1e95a702e149eaa25eb0f1c7b1798355b": {
+        "keytype": "ed25519",
+        "scheme": "ed25519",
+        "keyval": {
+          "public": "ed4928c628d1c2c6eae90338905995612959273a5c63f93636c14614ac8737d1"
+        },
+        "x-release-metadata-signatory": "root-3",
+        "x-release-metadata-custody": "fido2"
+      },
+      "9a06c5876292fa83e641f5613723296631cd5933a42978b53b52cd73e0923749": {
+        "keytype": "ed25519",
+        "scheme": "ed25519",
+        "keyval": {
+          "public": "ca93ac1705187071d67b83c7ff0efe8108e8ec4530575d7726879333dbdabe7c"
+        },
+        "x-release-metadata-signatory": "root-4",
+        "x-release-metadata-custody": "fido2"
+      },
+      "9131c726f14a97ff16719f546ff819838f239f4c400017505c36d180297ac621": {
+        "keytype": "ed25519",
+        "scheme": "ed25519",
+        "keyval": {
+          "public": "43a72e714401762df66b68c26dfbdf2682aaec9f2474eca4613e424a0fbafd3c"
+        },
+        "x-release-metadata-signatory": "ci",
+        "x-release-metadata-custody": "software"
+      },
+      "f6c9e395453b40ec22da6fb07a8b424f38c4363c33fdcff62eda5b7588af66bf": {
+        "keytype": "ed25519",
+        "scheme": "ed25519",
+        "keyval": {
+          "public": "20828bf5c5bdcacb684863336c202fb5599da48be5596615742170705beca9f7"
+        },
+        "x-release-metadata-signatory": "alice",
+        "x-release-metadata-custody": "software"
+      },
+      "30420e81b8becb5af20443b713e0248879d3960fc8b1636d33670ebbfc7db8bb": {
+        "keytype": "ed25519",
+        "scheme": "ed25519",
+        "keyval": {
+          "public": "d54207da194977dcf46adbfec2bc2e75b52d5a8a42184fedfdc00024f0e3e8da"
+        },
+        "x-release-metadata-signatory": "alice",
+        "x-release-metadata-custody": "fido2"
+      },
+      "3251121d2a5c1d37c30e115d844d2904aa4d7c016eca2ad945775cbb55ea121e": {
+        "keytype": "ed25519",
+        "scheme": "ed25519",
+        "keyval": {
+          "public": "511c34a1a2cb521df16bb246b8de8e7997ce235c7e76b22a3d7503a24819dd8a"
+        },
+        "x-release-metadata-signatory": "bob",
+        "x-release-metadata-custody": "secure-enclave"
+      },
+      "b3d7fb720a30715d527368d548cb31ef4ecd24db31d8749370f335cd3fd1254e": {
+        "keytype": "ssh-ed25519",
+        "scheme": "sshsig-ssh-ed25519",
+        "keyval": {
+          "public": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDHevlXTfHInaLE3ExyqYIcICy4LYLlL14XRRXXPpJi8"
+        },
+        "x-release-metadata-signatory": "carol",
+        "x-release-metadata-custody": "software"
+      }
+    },
+    "roles": {
+      "root": {
+        "keyids": [
+          "ecc4c378ac82e4fb0be86e9c9cd2e5a1e95a702e149eaa25eb0f1c7b1798355b",
+          "9a06c5876292fa83e641f5613723296631cd5933a42978b53b52cd73e0923749"
+        ],
+        "threshold": 2
+      },
+      "timestamp": {
+        "keyids": [
+          "9131c726f14a97ff16719f546ff819838f239f4c400017505c36d180297ac621"
+        ],
+        "threshold": 1
+      },
+      "snapshot": {
+        "keyids": [
+          "9131c726f14a97ff16719f546ff819838f239f4c400017505c36d180297ac621"
+        ],
+        "threshold": 1
+      },
+      "targets": {
+        "keyids": [
+          "f6c9e395453b40ec22da6fb07a8b424f38c4363c33fdcff62eda5b7588af66bf",
+          "30420e81b8becb5af20443b713e0248879d3960fc8b1636d33670ebbfc7db8bb",
+          "3251121d2a5c1d37c30e115d844d2904aa4d7c016eca2ad945775cbb55ea121e",
+          "b3d7fb720a30715d527368d548cb31ef4ecd24db31d8749370f335cd3fd1254e"
+        ],
+        "threshold": 1
+      }
+    },
+    "x-release-metadata-signatories": {}
+  },
+  "signatures": [
+    {
+      "keyid": "ecc4c378ac82e4fb0be86e9c9cd2e5a1e95a702e149eaa25eb0f1c7b1798355b",
+      "sig": "3ef276c0c91c0ae00c5183e8eb79e625cbb2e04897dcd92b078101704e0cd316c025ef95b9074f1e9799086eeabd12eb766772f679ca7fd08b2be89c018d9e01"
+    },
+    {
+      "keyid": "9a06c5876292fa83e641f5613723296631cd5933a42978b53b52cd73e0923749",
+      "sig": "5f21ae1880fda7f59c059486e2ed85772ca60eafa88bcdfdbdc9d436f626a4467fed0f2e2be1f6b7d843c64bd78185bb4829e6d0a9556e99786524ba80d7c307"
+    }
+  ]
+}

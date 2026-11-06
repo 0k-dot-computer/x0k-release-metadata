@@ -1,0 +1,25 @@
+{
+  "source": "implementation/release-metadata/hardware-kit.md",
+  "source_hash": "b70c7d1e053120b5",
+  "pipelines": [
+    {
+      "kind": "identity-tangle",
+      "input_hashes": {},
+      "config_hash": "7da0d054423fe0c5",
+      "outputs": [
+        {
+          "path": "crates/x0k-release-metadata/examples/hardware_kit.rs",
+          "hash": "f8152082c45c9435"
+        },
+        {
+          "path": "crates/x0k-release-metadata/kit/passkey.html",
+          "hash": "34b5d8a42b76ff7e"
+        },
+        {
+          "path": "crates/x0k-release-metadata/kit/sign-hardware-vectors.sh",
+          "hash": "dbf89b947252ef26"
+        }
+      ]
+    }
+  ]
+}
