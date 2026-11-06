@@ -102,6 +102,8 @@ Every scheme is verified in the process, by this crate. Nothing runs
 This is release 0.1. What you may rely on is written down in
 [the release-metadata decision](decisions/architecture/delivery/release-metadata.md):
 the record formats, the rules a reader checks, and what each refusal means.
+What it does not protect against, and what it assumes, is in
+[THREAT-MODEL.md](THREAT-MODEL.md); read it before you sign your first root.
 
 `crates/x0k-release-metadata/vectors/` holds the conformance vectors: small signed
 repositories on disk, each with the verdict a reader must reach. Another
