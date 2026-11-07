@@ -1,6 +1,6 @@
 {
   "source": "implementation/release-metadata/ceremony.md",
-  "source_hash": "a5f6a1358665d814",
+  "source_hash": "9b052c8449b2f178",
   "pipelines": [
     {
       "kind": "identity-tangle",
@@ -9,19 +9,19 @@
       "outputs": [
         {
           "path": "crates/x0k-release-metadata/src/ceremony.rs",
-          "hash": "00149fcfe36f742b"
+          "hash": "c1f331bd8c171f7d"
         },
         {
           "path": "crates/x0k-release-metadata/src/signer.rs",
-          "hash": "55b8d6becf9ae38c"
+          "hash": "436fc9d4905c1c80"
         },
         {
           "path": "crates/x0k-release-metadata/src/bin/x0k-release-metadata.rs",
-          "hash": "06b7d66b84e85d83"
+          "hash": "5f0a51260a8e638e"
         },
         {
           "path": "crates/x0k-release-metadata/tests/conformance/ceremony.rs",
-          "hash": "0bb381c781f2e3db"
+          "hash": "d96f14809688f7ef"
         }
       ]
     }

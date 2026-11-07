@@ -26,7 +26,7 @@ read it the same way.
 
 ```toml
 [dependencies]
-x0k-release-metadata = "0.1"
+x0k-release-metadata = "0.2"
 ```
 
 ```rust
@@ -77,6 +77,15 @@ x0k-release-metadata sign 2.root.json --trusted 1.root.json --key ~/.ssh/id_ed25
 x0k-release-metadata status 2.root.json --trusted 1.root.json
 ```
 
+A first root, version 1, is signed the same way, without `--trusted`.
+The build server signs the snapshot and the timestamp with its one online
+key, and a scheduled job refreshes the timestamp with one command:
+
+```sh
+x0k-release-metadata timestamp timestamp.json --trusted root.json --snapshot snapshot.json \
+    --previous timestamp.json --expires-in 1d --key online_ed25519
+```
+
 The program holds no key. It signs through `ssh-keygen -Y sign`, or any
 program with the same interface that you name with `--signer`. A new root
 needs the signatures of the old root's signatories and of its own. A targets
@@ -99,7 +108,7 @@ Every scheme is verified in the process, by this crate. Nothing runs
 
 ## What it promises
 
-This is release 0.1. What you may rely on is written down in
+This is release 0.2. What you may rely on is written down in
 [the release-metadata decision](decisions/architecture/delivery/release-metadata.md):
 the record formats, the rules a reader checks, and what each refusal means.
 What it does not protect against, and what it assumes, is in

@@ -57,7 +57,7 @@ steps without the program.
   bound. The status shows each delegation's patterns and key ids, so the
   signers review exactly what they grant.
 
-<a name="chunk-ceremony"></a><sub>[`src/ceremony.rs`](../../crates/x0k-release-metadata/src/ceremony.rs) · `#ceremony` · assembles [ceremony-error](#chunk-ceremony-error) · [staged-file](#chunk-staged-file) · [requirement](#chunk-requirement) · [standing](#chunk-standing) · [sign](#chunk-sign) · [rebuild](#chunk-rebuild)</sub>
+<a name="chunk-ceremony"></a><sub>[`src/ceremony.rs`](../../crates/x0k-release-metadata/src/ceremony.rs) · `#ceremony` · assembles [ceremony-error](#chunk-ceremony-error) · [staged-file](#chunk-staged-file) · [requirement](#chunk-requirement) · [standing](#chunk-standing) · [sign](#chunk-sign) · [rebuild](#chunk-rebuild) · [online](#chunk-online)</sub>
 
 ```rust {#ceremony file="src/ceremony.rs"}
 //! The ceremony of decision §5: stage a file, sign it one signatory at a
@@ -68,16 +68,18 @@ use std::path::Path;
 use std::time::{Duration, SystemTime};
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Map, Value};
 use base64ct::{Base64, Encoding};
+use sha2::{Digest, Sha256};
 
 use crate::canonical::{open_envelope, Signature};
 use crate::quorum::{KeyRing, Quorum};
 use crate::scheme::{check_signature, parse_sshsig, public_identity, PublicIdentity};
 use crate::verify::hex_digest;
+use crate::time::format_utc;
 use crate::{
     parse_utc, DelegatedRole, Key, ListedKey, Malformed, Root, SignatoryRule, SignatoryVerdict,
-    SignatureFault, Signer, SignerError, Targets, NAMESPACE,
+    SignatureFault, Signer, SignerError, Snapshot, Targets, Timestamp, NAMESPACE,
 };
 
 <<ceremony-error>>
@@ -91,6 +93,8 @@ use crate::{
 <<sign>>
 
 <<rebuild>>
+
+<<online>>
 ```
 
 A ceremony step that does not happen says why. The rebuild refusals carry
@@ -102,11 +106,16 @@ compare the two builds.
 ```rust {#ceremony-error}
 /// Why a ceremony step did not happen.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum CeremonyError {
     #[error("malformed: {0}")]
     Malformed(#[from] Malformed),
-    #[error("people stage and sign root and targets files, not {0}")]
+    #[error("people stage root and targets files; sign_snapshot and sign_timestamp make the online roles, not stage: {0}")]
     NotSignedByPeople(String),
+    #[error("the staged file is a {found} file, not a {expected} file")]
+    WrongKind { expected: &'static str, found: String },
+    #[error("staged root version {staged} is not a first root; a first root is version 1")]
+    NotFirstVersion { staged: u64 },
     #[error("staged root version {staged} does not follow trusted version {trusted}")]
     NotNextVersion { trusted: u64, staged: u64 },
     #[error("a root is not a delegated role, so it takes no role and no delegating targets file")]
@@ -179,11 +188,25 @@ impl StagedFile {
     }
 }
 
-/// The kinds of file that people sign.
+/// The kinds of metadata file: people sign roots and targets files; the
+/// online key signs snapshots and timestamps.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Kind {
     Root,
     Targets,
+    Snapshot,
+    Timestamp,
+}
+
+impl Kind {
+    fn name(self) -> &'static str {
+        match self {
+            Kind::Root => "root",
+            Kind::Targets => "targets",
+            Kind::Snapshot => "snapshot",
+            Kind::Timestamp => "timestamp",
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -197,7 +220,9 @@ fn staged_kind(signed: &Value) -> Result<Kind, CeremonyError> {
     match field.kind.as_str() {
         "root" => Ok(Kind::Root),
         "targets" => Ok(Kind::Targets),
-        other => Err(CeremonyError::NotSignedByPeople(other.to_owned())),
+        "snapshot" => Ok(Kind::Snapshot),
+        "timestamp" => Ok(Kind::Timestamp),
+        other => Err(Malformed::WrongType { expected: "root or targets", found: other.to_owned() }.into()),
     }
 }
 
@@ -218,6 +243,7 @@ pub fn stage(body: &[u8], role: Option<&str>, now: SystemTime) -> Result<Vec<u8>
             KeyRing::new(&open_envelope::<Root>(&file)?.body.keys)?;
         }
         Kind::Targets => check_grant_end(&open_envelope::<Targets>(&file)?.body, role, now)?,
+        online => return Err(CeremonyError::NotSignedByPeople(online.name().to_owned())),
     }
     Ok(file)
 }
@@ -247,10 +273,20 @@ fn check_grant_end(targets: &Targets, role: Option<&str>, now: SystemTime) -> Re
 A `Requirement` is the list of thresholds a staged file must meet. Each
 threshold is one role's rule: its key ids, its count, the key listing the
 ids point into, and the signatories' own rules, which always come from
-the root. The signer names the root they trust. For a staged root, that is
-the version before it, and the staged version must be exactly one more.
-For a targets file it is the current root, and a delegated role also
-names the targets file that delegates it.
+the root. Each kind of staged file has its own constructor, which names
+what that kind is checked against, so no constructor takes an argument
+that only some kinds use:
+
+- `first_root`: root version 1. Nothing came before it, so its own root
+  threshold is the only one (§5), and readers pin it at install (§1).
+- `next_root`: root version N+1, checked against version N, the root the
+  signer trusts. It needs version N's threshold and its own, and the
+  staged version must be exactly one more.
+- `targets`: the top-level targets file, under the current root.
+- `delegated_targets`: a delegated role's file, under the current root and
+  the targets file that delegates it.
+
+Each constructor refuses a staged file of another kind.
 
 A targets file of an audience the root marks public that delegates paths
 needs every signatory its role lists (§8), so its threshold is the number
@@ -317,38 +353,56 @@ impl Threshold {
 }
 
 impl Requirement {
-    /// What `staged` must carry. `trusted_root` is the root the signer
-    /// trusts: for a staged root, the version before it; for a targets file,
-    /// the current root. A delegated targets role also gives the targets
-    /// file that delegates it and the role's name.
-    pub fn new(
-        staged: &[u8],
-        trusted_root: &[u8],
-        delegation: Option<(&[u8], &str)>,
-    ) -> Result<Self, CeremonyError> {
-        let kind = staged_kind(&StagedFile::read(staged)?.signed)?;
+    /// What a first root, version 1, must carry: its own root threshold (§5).
+    pub fn first_root(staged: &[u8]) -> Result<Self, CeremonyError> {
+        expect_kind(staged, Kind::Root)?;
+        let first = open_envelope::<Root>(staged)?.body;
+        if first.version != 1 {
+            return Err(CeremonyError::NotFirstVersion { staged: first.version });
+        }
+        let label = format!("root version {}", first.version);
+        Self::checked(Kind::Root, vec![Threshold::top_level(&first, "root", label)?])
+    }
+
+    /// What root version N+1 must carry: the root threshold of version N,
+    /// `trusted_root`, and its own (§5).
+    pub fn next_root(staged: &[u8], trusted_root: &[u8]) -> Result<Self, CeremonyError> {
+        expect_kind(staged, Kind::Root)?;
         let trusted = open_envelope::<Root>(trusted_root)?.body;
-        let thresholds = match (kind, delegation) {
-            (Kind::Root, Some(_)) => return Err(CeremonyError::RootIsNotDelegated),
-            (Kind::Root, None) => {
-                let next = open_envelope::<Root>(staged)?.body;
-                if trusted.version.checked_add(1) != Some(next.version) {
-                    return Err(CeremonyError::NotNextVersion { trusted: trusted.version, staged: next.version });
-                }
-                vec![
-                    Threshold::top_level(&trusted, "root", format!("root version {}", trusted.version))?,
-                    Threshold::top_level(&next, "root", format!("root version {}", next.version))?,
-                ]
-            }
-            (Kind::Targets, None) => vec![Threshold::top_level(&trusted, "targets", "targets".to_owned())?],
-            (Kind::Targets, Some((delegator, role))) => {
-                let mut threshold = Threshold::delegated(&trusted, delegator, role)?;
-                if trusted.public_audiences.contains(role) && open_envelope::<Targets>(staged)?.body.delegates() {
-                    threshold.threshold = threshold.with_quorum(|quorum| quorum.signatory_count())?;
-                }
-                vec![threshold]
-            }
-        };
+        let next = open_envelope::<Root>(staged)?.body;
+        if trusted.version.checked_add(1) != Some(next.version) {
+            return Err(CeremonyError::NotNextVersion { trusted: trusted.version, staged: next.version });
+        }
+        Self::checked(
+            Kind::Root,
+            vec![
+                Threshold::top_level(&trusted, "root", format!("root version {}", trusted.version))?,
+                Threshold::top_level(&next, "root", format!("root version {}", next.version))?,
+            ],
+        )
+    }
+
+    /// What the top-level targets file must carry under `root`.
+    pub fn targets(staged: &[u8], root: &[u8]) -> Result<Self, CeremonyError> {
+        expect_kind(staged, Kind::Targets)?;
+        let root = open_envelope::<Root>(root)?.body;
+        Self::checked(Kind::Targets, vec![Threshold::top_level(&root, "targets", "targets".to_owned())?])
+    }
+
+    /// What delegated role `role`'s file must carry, under `root` and the
+    /// targets file `delegator` that delegates it.
+    pub fn delegated_targets(staged: &[u8], root: &[u8], delegator: &[u8], role: &str) -> Result<Self, CeremonyError> {
+        expect_kind(staged, Kind::Targets)?;
+        let root = open_envelope::<Root>(root)?.body;
+        let mut threshold = Threshold::delegated(&root, delegator, role)?;
+        if root.public_audiences.contains(role) && open_envelope::<Targets>(staged)?.body.delegates() {
+            threshold.threshold = threshold.with_quorum(|quorum| quorum.signatory_count())?;
+        }
+        Self::checked(Kind::Targets, vec![threshold])
+    }
+
+    /// A requirement whose every threshold the verifier's own quorum accepts.
+    fn checked(kind: Kind, thresholds: Vec<Threshold>) -> Result<Self, CeremonyError> {
         for threshold in &thresholds {
             threshold.with_quorum(|_| ())?;
         }
@@ -383,8 +437,25 @@ impl Requirement {
                     targets: Some(envelope.body),
                 }
             }
+            Kind::Snapshot => {
+                let envelope = open_envelope::<Snapshot>(staged)?;
+                Opened { canonical: envelope.canonical, signatures: envelope.signatures, targets: None }
+            }
+            Kind::Timestamp => {
+                let envelope = open_envelope::<Timestamp>(staged)?;
+                Opened { canonical: envelope.canonical, signatures: envelope.signatures, targets: None }
+            }
         })
     }
+}
+
+/// Refuses a staged file that is not of the kind a constructor checks.
+fn expect_kind(staged: &[u8], expected: Kind) -> Result<(), CeremonyError> {
+    let found = staged_kind(&StagedFile::read(staged)?.signed)?;
+    if found != expected {
+        return Err(CeremonyError::WrongKind { expected: expected.name(), found: found.name().to_owned() });
+    }
+    Ok(())
 }
 
 /// A staged file opened as the verifier opens it.
@@ -574,6 +645,102 @@ impl Rebuild {
 }
 ```
 
+## The online roles
+
+The snapshot and the timestamp change on every release and, for the
+timestamp, every few hours, so one online key signs both (§6). The crate
+builds and signs them, through the same signer program as the people's
+files, so the build server's scheduled job is one call:
+
+- `sign_snapshot` lists each targets file it is given, top-level and
+  delegated, by role name, with the file's version, length and SHA-256.
+- `sign_timestamp` lists the snapshot it is given the same way.
+
+Each takes the previous file of its role, when there is one, and writes
+version one more than it; without one it writes version 1. Each takes the
+expiry as a time, which the caller reads from its own clock, since the
+crate reads none. Re-signing the timestamp with a later expiry over the
+same snapshot is the refresh a scheduled job runs.
+
+Both sign through `sign`, under the root's snapshot or timestamp role, so
+the signature is checked against the online key's listing before the file
+is returned. The signer program makes SSHSIG, so the online key's object
+uses an SSHSIG scheme, `sshsig-ssh-ed25519` for one software key. A TUF
+`ed25519` online key is signed by other means.
+
+<a name="chunk-online"></a><sub>[`src/ceremony.rs`](../../crates/x0k-release-metadata/src/ceremony.rs) · `#online`</sub>
+
+```rust {#online}
+/// The TUF specification version the files this crate writes declare.
+const SPEC_VERSION: &str = "1.0.37";
+
+/// Builds and signs a snapshot that lists `targets`, every targets file by
+/// role name (`targets` and each delegated role), through `signer` with the
+/// key that `key` names (§6). Its version is one more than `previous`'s, or
+/// 1, and it expires at `expires`.
+pub fn sign_snapshot(
+    root: &[u8],
+    previous: Option<&[u8]>,
+    targets: &BTreeMap<String, Vec<u8>>,
+    expires: SystemTime,
+    signer: &dyn Signer,
+    key: &Path,
+) -> Result<Vec<u8>, CeremonyError> {
+    let mut meta = Map::new();
+    for (role, bytes) in targets {
+        let version = open_envelope::<Targets>(bytes)?.body.version;
+        meta.insert(format!("{role}.json"), meta_entry(version, bytes));
+    }
+    let version = match previous {
+        Some(previous) => open_envelope::<Snapshot>(previous)?.body.version.saturating_add(1),
+        None => 1,
+    };
+    let body = json!({
+        "_type": "snapshot", "spec_version": SPEC_VERSION, "version": version,
+        "expires": format_utc(expires)?, "meta": meta,
+    });
+    sign_online(Kind::Snapshot, root, body, signer, key)
+}
+
+/// Builds and signs a timestamp that lists `snapshot`, through `signer`
+/// with the key that `key` names (§6). Its version is one more than
+/// `previous`'s, or 1, and it expires at `expires`. Called with the current
+/// timestamp as `previous` and the same snapshot, it is the refresh.
+pub fn sign_timestamp(
+    root: &[u8],
+    previous: Option<&[u8]>,
+    snapshot: &[u8],
+    expires: SystemTime,
+    signer: &dyn Signer,
+    key: &Path,
+) -> Result<Vec<u8>, CeremonyError> {
+    let snapshot_version = open_envelope::<Snapshot>(snapshot)?.body.version;
+    let version = match previous {
+        Some(previous) => open_envelope::<Timestamp>(previous)?.body.version.saturating_add(1),
+        None => 1,
+    };
+    let body = json!({
+        "_type": "timestamp", "spec_version": SPEC_VERSION, "version": version,
+        "expires": format_utc(expires)?,
+        "meta": { "snapshot.json": meta_entry(snapshot_version, snapshot) },
+    });
+    sign_online(Kind::Timestamp, root, body, signer, key)
+}
+
+/// One listed file: its version, length and SHA-256.
+fn meta_entry(version: u64, bytes: &[u8]) -> Value {
+    json!({ "version": version, "length": bytes.len(), "hashes": { "sha256": hex::encode(Sha256::digest(bytes)) } })
+}
+
+fn sign_online(kind: Kind, root: &[u8], body: Value, signer: &dyn Signer, key: &Path) -> Result<Vec<u8>, CeremonyError> {
+    let file = StagedFile { signed: body, signatures: Vec::new() }.write()?;
+    let root = open_envelope::<Root>(root)?.body;
+    let role = kind.name();
+    let requirement = Requirement::checked(kind, vec![Threshold::top_level(&root, role, role.to_owned())?])?;
+    sign(&file, &requirement, &Rebuild::Rebuilt(BTreeMap::new()), signer, key)
+}
+```
+
 ## The signer program
 
 The commands sign through a program with `ssh-keygen -Y sign`'s interface
@@ -581,8 +748,13 @@ The commands sign through a program with `ssh-keygen -Y sign`'s interface
 standard input and the armored signature on its standard output. git signs
 commits through the same interface (`gpg.ssh.program`). `ssh-keygen` is the
 default, and it reaches a FIDO2 token, a key file or an SSH agent such as
-Secretive. Its standard error stays the terminal's, so a passphrase prompt
-or a "touch your key" message reaches the signer.
+Secretive. The program's standard error is captured: `ssh-keygen` writes
+"Signing data on standard input" for every signature, which a scheduled
+job does not want, so the error output appears only in the error when the
+program fails. A passphrase prompt goes to the terminal itself, not to
+standard error, and still reaches the signer; a security key's "confirm
+user presence" line does not, so the `sign` command says before it signs
+that a security key may wait for a touch.
 
 `Signer` is the library's seam: an embedder can sign some other way, such
 as x0k's approver client, and the commands use `SignerProgram`. This is
@@ -629,7 +801,7 @@ impl Signer for SignerProgram {
             .arg(key)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
+            .stderr(Stdio::piped())
             .spawn()
             .map_err(SignerError::Spawn)?;
         if let Some(mut stdin) = child.stdin.take() {
@@ -637,7 +809,8 @@ impl Signer for SignerProgram {
         }
         let output = child.wait_with_output().map_err(SignerError::Io)?;
         if !output.status.success() {
-            return Err(SignerError::Failed(output.status));
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+            return Err(SignerError::Failed { status: output.status, stderr });
         }
         Ok(output.stdout)
     }
@@ -645,13 +818,14 @@ impl Signer for SignerProgram {
 
 /// Why the signer program made no signature.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum SignerError {
     #[error("cannot start it: {0}")]
     Spawn(#[source] std::io::Error),
     #[error("cannot pass it the message or read its signature: {0}")]
     Io(#[source] std::io::Error),
-    #[error("it failed: {0}")]
-    Failed(ExitStatus),
+    #[error("it failed ({status}): {stderr}")]
+    Failed { status: ExitStatus, stderr: String },
 }
 ```
 
@@ -669,6 +843,24 @@ on an error, so a script can wait for the ceremony to finish.
 x0k-release-metadata stage 2.root.body.json 2.root.json
 x0k-release-metadata sign 2.root.json --trusted 1.root.json --key ~/.ssh/id_ed25519_sk
 x0k-release-metadata status 2.root.json --trusted 1.root.json
+```
+
+A first root takes no `--trusted`, since nothing came before it:
+
+```
+x0k-release-metadata stage 1.root.body.json 1.root.json
+x0k-release-metadata sign 1.root.json --key ~/.ssh/id_ed25519_sk
+x0k-release-metadata status 1.root.json
+```
+
+The build server signs the online roles with its one key. A scheduled
+refresh re-signs the timestamp over the same snapshot, one version up:
+
+```
+x0k-release-metadata snapshot snapshot.json --trusted root.json --targets targets.json --targets stable.json \
+    --previous snapshot.json --expires-in 7d --key online_ed25519
+x0k-release-metadata timestamp timestamp.json --trusted root.json --snapshot snapshot.json \
+    --previous timestamp.json --expires-in 1d --key online_ed25519
 ```
 
 A delegated targets file also names the file that delegates it and its
@@ -692,18 +884,26 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
+use serde::Deserialize;
 use x0k_release_metadata::{
-    sign, stage, CeremonyError, DelegatedRole, Rebuild, Requirement, SignerProgram, Standing,
+    sign, sign_snapshot, sign_timestamp, stage, CeremonyError, DelegatedRole, Rebuild, Requirement, SignerProgram,
+    Standing,
 };
 
 const USAGE: &str = "\
 usage:
   x0k-release-metadata stage <body.json> <staged.json> [--role <name>]
-  x0k-release-metadata status <staged.json> --trusted <root.json> [--delegator <targets.json> --role <name>]
-  x0k-release-metadata sign <staged.json> --trusted <root.json> [--delegator <targets.json> --role <name>]
+  x0k-release-metadata status <staged.json> [--trusted <root.json>] [--delegator <targets.json> --role <name>]
+  x0k-release-metadata sign <staged.json> [--trusted <root.json>] [--delegator <targets.json> --role <name>]
       --key <key file> [--signer <program>] [--rebuilt <target path>=<file>]... [--not-reproducible]
+  x0k-release-metadata snapshot <snapshot.json> --trusted <root.json> --targets <role>.json...
+      [--previous <snapshot.json>] --expires-in <hours>h|<days>d --key <key file> [--signer <program>]
+  x0k-release-metadata timestamp <timestamp.json> --trusted <root.json> --snapshot <snapshot.json>
+      [--previous <timestamp.json>] --expires-in <hours>h|<days>d --key <key file> [--signer <program>]
+
+A root without --trusted is a first root, version 1.
 ";
 
 #[derive(Debug, thiserror::Error)]
@@ -720,6 +920,8 @@ enum CommandError {
     Ceremony(#[from] CeremonyError),
     #[error("cannot write the status: {0}")]
     Status(#[source] std::io::Error),
+    #[error("not a metadata file: {0}")]
+    NotMetadata(#[source] serde_json::Error),
 }
 
 <<cli-arguments>>
@@ -755,7 +957,10 @@ struct Arguments {
 }
 
 fn parse_ceremony_arguments(mut args: impl Iterator<Item = String>) -> Result<Arguments, CommandError> {
-    const WITH_VALUE: [&str; 6] = ["--trusted", "--delegator", "--role", "--key", "--signer", "--rebuilt"];
+    const WITH_VALUE: [&str; 10] = [
+        "--trusted", "--delegator", "--role", "--key", "--signer", "--rebuilt", "--targets", "--snapshot", "--previous",
+        "--expires-in",
+    ];
     let mut parsed = Arguments { positional: Vec::new(), options: BTreeMap::new(), not_reproducible: false };
     while let Some(arg) = args.next() {
         if arg == "--not-reproducible" {
@@ -798,15 +1003,74 @@ fn write_ceremony_file(path: &Path, bytes: &[u8]) -> Result<(), CommandError> {
     fs::write(path, bytes).map_err(|source| CommandError::File { path: path.to_owned(), source })
 }
 
+/// A metadata file's body, read only for its kind and version.
+#[derive(Deserialize)]
+struct Header {
+    signed: HeaderBody,
+}
+
+#[derive(Deserialize)]
+struct HeaderBody {
+    #[serde(rename = "_type")]
+    kind: String,
+    #[serde(default)]
+    version: u64,
+    #[serde(default)]
+    expires: String,
+}
+
+fn header_of(bytes: &[u8]) -> Result<HeaderBody, CommandError> {
+    Ok(serde_json::from_slice::<Header>(bytes).map_err(CommandError::NotMetadata)?.signed)
+}
+
+fn optional_file(args: &Arguments, name: &str) -> Result<Option<Vec<u8>>, CommandError> {
+    args.one(name)?.map(|path| read_ceremony_file(Path::new(path))).transpose()
+}
+
+/// The requirement the staged file's kind and the given files name.
 fn requirement_for(staged: &[u8], args: &Arguments) -> Result<Requirement, CommandError> {
-    let trusted = read_ceremony_file(Path::new(args.required("--trusted")?))?;
-    let delegator = args.one("--delegator")?.map(|p| read_ceremony_file(Path::new(p))).transpose()?;
-    let delegation = match (&delegator, args.one("--role")?) {
-        (Some(bytes), Some(role)) => Some((bytes.as_slice(), role)),
-        (None, None) => None,
-        _ => return Err(CommandError::Usage("--delegator and --role go together")),
+    let kind = header_of(staged)?.kind;
+    let trusted = optional_file(args, "--trusted")?;
+    let delegator = optional_file(args, "--delegator")?;
+    let role = args.one("--role")?;
+    Ok(match (kind.as_str(), trusted, delegator, role) {
+        ("root", None, None, None) => Requirement::first_root(staged)?,
+        ("root", Some(trusted), None, None) => Requirement::next_root(staged, &trusted)?,
+        ("root", ..) => return Err(CommandError::Usage("a root takes no --delegator or --role")),
+        ("targets", Some(root), None, None) => Requirement::targets(staged, &root)?,
+        ("targets", Some(root), Some(delegator), Some(role)) => {
+            Requirement::delegated_targets(staged, &root, &delegator, role)?
+        }
+        ("targets", None, ..) => return Err(CommandError::Usage("a targets file takes --trusted <root.json>")),
+        ("targets", ..) => return Err(CommandError::Usage("--delegator and --role go together")),
+        _ => return Err(CommandError::Usage("status and sign take root and targets files")),
+    })
+}
+
+/// The expiry `--expires-in` names, from the clock now.
+fn expiry_for(args: &Arguments) -> Result<SystemTime, CommandError> {
+    let usage = CommandError::Usage("--expires-in takes <hours>h or <days>d");
+    let text = args.required("--expires-in")?;
+    let (count, unit) = match (text.strip_suffix('h'), text.strip_suffix('d')) {
+        (Some(count), _) => (count, 3_600),
+        (_, Some(count)) => (count, 86_400),
+        _ => return Err(usage),
     };
-    Ok(Requirement::new(staged, &trusted, delegation)?)
+    let seconds = count.parse::<u64>().ok().and_then(|count| count.checked_mul(unit)).ok_or(usage)?;
+    Ok(SystemTime::now() + Duration::from_secs(seconds))
+}
+
+fn signer_for(args: &Arguments) -> Result<SignerProgram, CommandError> {
+    Ok(args.one("--signer")?.map_or_else(SignerProgram::default, SignerProgram::new))
+}
+
+fn write_online(path: &str, file: &[u8]) -> Result<ExitCode, CommandError> {
+    write_ceremony_file(Path::new(path), file)?;
+    let header = header_of(file)?;
+    let mut stdout = std::io::stdout().lock();
+    writeln!(stdout, "{path}: {} version {}, expires {}", header.kind, header.version, header.expires)
+        .map_err(CommandError::Status)?;
+    Ok(ExitCode::SUCCESS)
 }
 
 fn rebuild_for(args: &Arguments) -> Result<Rebuild, CommandError> {
@@ -868,11 +1132,41 @@ fn run_ceremony_command(args: &Arguments) -> Result<ExitCode, CommandError> {
             let staged = read_ceremony_file(Path::new(staged_path))?;
             let requirement = requirement_for(&staged, args)?;
             let rebuild = rebuild_for(args)?;
-            let signer = args.one("--signer")?.map_or_else(SignerProgram::default, SignerProgram::new);
+            let signer = signer_for(args)?;
             let key = Path::new(args.required("--key")?);
+            let mut stderr = std::io::stderr().lock();
+            let _ = writeln!(stderr, "signing with {}; a security key waits for a touch", key.display());
+            drop(stderr);
             let signed = sign(&staged, &requirement, &rebuild, &signer, key)?;
             write_ceremony_file(Path::new(staged_path), &signed)?;
             write_status(&requirement.standing(&signed)?, &requirement.delegations(&signed)?).map(|_| ExitCode::SUCCESS)
+        }
+        ["snapshot", out] => {
+            let root = read_ceremony_file(Path::new(args.required("--trusted")?))?;
+            let previous = optional_file(args, "--previous")?;
+            let mut targets = BTreeMap::new();
+            for path in args.options.get("--targets").map(Vec::as_slice).unwrap_or_default() {
+                let path = Path::new(path);
+                let role = path
+                    .file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .ok_or(CommandError::Usage("a --targets file is named <role>.json"))?;
+                targets.insert(role.to_owned(), read_ceremony_file(path)?);
+            }
+            if targets.is_empty() {
+                return Err(CommandError::Usage("snapshot takes at least one --targets <role>.json"));
+            }
+            let (expires, signer, key) = (expiry_for(args)?, signer_for(args)?, args.required("--key")?);
+            let file = sign_snapshot(&root, previous.as_deref(), &targets, expires, &signer, Path::new(key))?;
+            write_online(out, &file)
+        }
+        ["timestamp", out] => {
+            let root = read_ceremony_file(Path::new(args.required("--trusted")?))?;
+            let previous = optional_file(args, "--previous")?;
+            let snapshot = read_ceremony_file(Path::new(args.required("--snapshot")?))?;
+            let (expires, signer, key) = (expiry_for(args)?, signer_for(args)?, args.required("--key")?);
+            let file = sign_timestamp(&root, previous.as_deref(), &snapshot, expires, &signer, Path::new(key))?;
+            write_online(out, &file)
         }
         _ => Err(CommandError::Usage("unknown command")),
     }
@@ -896,6 +1190,10 @@ Unix only.
 | `a_public_delegation_waits_for_every_signatory_the_role_lists` | §8 | The status of a delegation staged for an audience the root marks public counts every signatory its role lists, not its threshold. |
 | `staging_an_audience_version_that_delegates_for_more_than_a_day_is_refused` | §8 | `stage` refuses an audience's version that delegates and expires more than 24 hours after it is staged, and one that does not name its role; it stages one that expires within a day, and a top-level targets version whatever its expiry. |
 | `the_status_shows_each_delegations_patterns_and_key_ids` | §8 | The status of a staged version that delegates shows each delegation's patterns and key ids, so the signers review what they grant. |
+| `the_online_roles_are_signed_by_one_call_each` | §6 | `sign_snapshot` and `sign_timestamp` sign a snapshot and a timestamp that verify, and a refresh over the same snapshot is version 2 and verifies after version 1. |
+| `a_stale_or_rewound_online_file_is_refused` | §6 | A timestamp signed with an expiry in the past is refused as expired, and one rewound to version 1 after version 2 as a rollback. |
+| `a_failed_signer_program_reports_what_it_wrote` | §7 | A signer program that fails has its error output in the error, and a signer that succeeds prints nothing. |
+| `a_first_root_is_signed_one_signatory_at_a_time` | §5 | A first root is staged and signed one signatory after another; its status says 1 of 2 until the second signs, then met, and readers start from the result. |
 | `a_targets_entry_that_differs_from_the_signers_rebuild_is_not_signed` | §6 | `sign` refuses a targets file whose entry differs from the signer's rebuild, naming both hashes, and refuses one with no rebuild; the signer program is not called; the matching rebuild is signed. |
 
 <a name="chunk-ceremony-tests"></a><sub>[`tests/conformance/ceremony.rs`](../../crates/x0k-release-metadata/tests/conformance/ceremony.rs) · `#ceremony-tests` · assembles [ceremony-keys](#chunk-ceremony-keys) · [ceremony-scratch](#chunk-ceremony-scratch) · [ceremony-bodies](#chunk-ceremony-bodies) · [ceremony-cases](#chunk-ceremony-cases)</sub>
@@ -906,7 +1204,7 @@ Unix only.
 use std::collections::BTreeMap;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -918,7 +1216,8 @@ use ssh_key::private::Ed25519Keypair;
 use ssh_key::public::KeyData;
 use ssh_key::{HashAlg, LineEnding, PrivateKey, PublicKey, SshSig};
 use x0k_release_metadata::{
-    canonical_json, key_id, parse_utc, verify, Artifact, Fetched, Refusal, TrustedState, Verified, NAMESPACE,
+    canonical_json, key_id, parse_utc, sign_snapshot, sign_timestamp, verify, Artifact, Fetched, Refusal, Signer,
+    SignerError, SignerProgram, TrustedState, Verified, NAMESPACE,
 };
 
 const PROGRAM: &str = env!("CARGO_BIN_EXE_x0k-release-metadata");
@@ -1031,6 +1330,7 @@ impl Scratch {
         let script = format!(
             "#!/bin/sh\n\
              printf '%s\\n' \"$*\" >> '{dir}/calls'\n\
+             echo 'Signing data on standard input' >&2\n\
              cat > '{dir}/message'\n\
              cat \"$6.sig\"\n"
         );
@@ -1113,7 +1413,7 @@ fn targets_body(entries: &[&str], delegations: Option<Value>) -> Value {
 }
 
 /// A reader that trusts `trusted_root` updates to `new_root` and looks up the artifact.
-fn reader_update(trusted_root: Vec<u8>, new_root: Vec<u8>, alice: &SignatoryKey, online: &OnlineKey) -> Result<Verified, Refusal> {
+fn reader_update(trusted_root: Vec<u8>, new_roots: Vec<Vec<u8>>, alice: &SignatoryKey, online: &OnlineKey) -> Result<Verified, Refusal> {
     let bytes = |value: &Value| serde_json::to_vec(value).expect("json");
     let targets = targets_body(&[PATH], None);
     let targets = bytes(&envelope(&targets, vec![alice.signature(&message(&targets))]));
@@ -1128,7 +1428,7 @@ fn reader_update(trusted_root: Vec<u8>, new_root: Vec<u8>, alice: &SignatoryKey,
     });
     let timestamp = bytes(&envelope(&timestamp, vec![online.signature(&message(&timestamp))]));
     let fetched = Fetched {
-        roots: vec![new_root],
+        roots: new_roots,
         timestamp,
         snapshot,
         targets: BTreeMap::from([("targets".to_owned(), targets)]),
@@ -1245,7 +1545,7 @@ fn a_root_signed_one_signatory_at_a_time_shows_who_is_missing_until_both_thresho
 
     let trusted = fs::read(&ceremony.trusted).expect("root 1");
     let signed = fs::read(&ceremony.staged).expect("root 2");
-    let verified = reader_update(trusted, signed.clone(), &ceremony.alice, &ceremony.online).expect("a reader walks to root 2");
+    let verified = reader_update(trusted, vec![signed.clone()], &ceremony.alice, &ceremony.online).expect("a reader walks to root 2");
     assert_eq!(verified.trusted.root, signed);
 }
 
@@ -1254,6 +1554,7 @@ fn the_sign_command_signs_only_through_the_signer_program_it_is_given() {
     let ceremony = RootCeremony::new();
     let signed = ceremony.sign("root-2");
     assert!(signed.status.success(), "{}", stderr(&signed));
+    assert!(!stderr(&signed).contains("Signing data on standard input"), "the signer's chatter leaked: {}", stderr(&signed));
     let key = text(&ceremony.scratch.path("root-2"));
     assert_eq!(ceremony.scratch.calls(), vec![format!("-Y sign -n release-metadata -f {key}")]);
     assert_eq!(fs::read(ceremony.scratch.path("message")).expect("recorded message"), message(&ceremony.next));
@@ -1264,6 +1565,7 @@ fn the_sign_command_signs_only_through_the_signer_program_it_is_given() {
     let before = fs::read(&ceremony.staged).expect("staged");
     let failed = ceremony.sign("nobody");
     assert_eq!(failed.status.code(), Some(2), "{}", stdout(&failed));
+    assert!(stderr(&failed).contains("Signing data on standard input"), "a failed signer's output is shown: {}", stderr(&failed));
     assert_eq!(ceremony.scratch.calls().len(), 2);
     assert_eq!(fs::read(&ceremony.staged).expect("staged"), before);
 }
@@ -1406,5 +1708,162 @@ fn the_status_shows_each_delegations_patterns_and_key_ids() {
     assert_eq!(status.status.code(), Some(1), "{}", stderr(&status));
     let line = format!("delegates chariot-1.1: paths fleet/chariot-1.1-*; keys {}; threshold 1", session.id);
     assert!(stdout(&status).contains(&line), "{}", stdout(&status));
+}
+
+#[test]
+fn a_first_root_is_signed_one_signatory_at_a_time() {
+    let scratch = Scratch::new();
+    let keys = [SignatoryKey::new(1, "root-1"), SignatoryKey::new(2, "root-2")];
+    let alice = SignatoryKey::new(20, "alice");
+    let online = OnlineKey::new();
+    let first = root_body(1, &[&keys[0], &keys[1]], &alice, &online);
+    let body = text(&scratch.put("1.root.body.json", &first));
+    let staged = text(&scratch.path("1.root.json"));
+    let staging = scratch.run(&["stage", &body, &staged]);
+    assert!(staging.status.success(), "{}", stderr(&staging));
+    let signer = text(&scratch.stub_signer(&[&keys[0], &keys[1]], &message(&first)));
+    let status = || scratch.run(&["status", &staged]);
+    let sign = |key: &str| scratch.run(&["sign", &staged, "--key", &text(&scratch.path(key)), "--signer", &signer]);
+
+    let unsigned = status();
+    assert_eq!(unsigned.status.code(), Some(1), "{}", stderr(&unsigned));
+    assert!(stdout(&unsigned).contains("root version 1: 0 of 2 signatories count; missing root-1, root-2"), "{}", stdout(&unsigned));
+    let one = sign("root-1");
+    assert!(one.status.success(), "{}", stderr(&one));
+    let half = status();
+    assert_eq!(half.status.code(), Some(1), "one of two signatories is not the threshold: {}", stdout(&half));
+    assert!(stdout(&half).contains("root version 1: 1 of 2 signatories count; missing root-2"), "{}", stdout(&half));
+    let two = sign("root-2");
+    assert!(two.status.success(), "{}", stderr(&two));
+    let done = status();
+    assert_eq!(done.status.code(), Some(0), "{}", stdout(&done));
+    assert!(stdout(&done).contains("root version 1: 2 of 2 signatories count; met"), "{}", stdout(&done));
+
+    let root = fs::read(&staged).expect("root 1");
+    reader_update(root, Vec::new(), &alice, &online).expect("a reader starts from the signed first root");
+}
+
+/// Signs in process with a software SSH key, the way `ssh-keygen -Y sign` does.
+struct InProcessSigner<'a>(&'a SignatoryKey);
+
+impl Signer for InProcessSigner<'_> {
+    fn sign(&self, _key: &Path, namespace: &str, message: &[u8]) -> Result<Vec<u8>, SignerError> {
+        let envelope = self.0.private.sign(namespace, HashAlg::Sha512, message).expect("sshsig");
+        Ok(envelope.to_pem(LineEnding::LF).expect("armor").into_bytes())
+    }
+}
+
+/// A root whose snapshot and timestamp roles are the SSH key `online`, with
+/// one targets file that Alice signed and that lists the artifact.
+struct OnlineRepository {
+    root: Vec<u8>,
+    targets: Vec<u8>,
+    online: SignatoryKey,
+}
+
+impl OnlineRepository {
+    fn new() -> Self {
+        let root_keys = [SignatoryKey::new(1, "root-1"), SignatoryKey::new(2, "root-2")];
+        let alice = SignatoryKey::new(20, "alice");
+        let online = SignatoryKey::new(10, "online");
+        let mut keys: Map<String, Value> = root_keys.iter().map(|k| (k.id.clone(), k.object.clone())).collect();
+        keys.insert(alice.id.clone(), alice.object.clone());
+        keys.insert(online.id.clone(), online.object.clone());
+        let root_ids: Vec<&str> = root_keys.iter().map(|k| k.id.as_str()).collect();
+        let root = json!({
+            "_type": "root", "spec_version": "1.0.37", "consistent_snapshot": false,
+            "version": 1, "expires": LATER, "keys": keys,
+            "roles": {
+                "root": { "keyids": root_ids, "threshold": 2 },
+                "timestamp": { "keyids": [online.id], "threshold": 1 },
+                "snapshot": { "keyids": [online.id], "threshold": 1 },
+                "targets": { "keyids": [alice.id], "threshold": 1 },
+            },
+        });
+        let targets = targets_body(&[PATH], None);
+        let targets = envelope(&targets, vec![alice.signature(&message(&targets))]);
+        let bytes = |value: &Value| serde_json::to_vec(value).expect("json");
+        Self { root: bytes(&envelope(&root, Vec::new())), targets: bytes(&targets), online }
+    }
+
+    fn targets_files(&self) -> BTreeMap<String, Vec<u8>> {
+        BTreeMap::from([("targets".to_owned(), self.targets.clone())])
+    }
+
+    fn snapshot(&self, previous: Option<&[u8]>, expires: SystemTime) -> Vec<u8> {
+        let signer = InProcessSigner(&self.online);
+        sign_snapshot(&self.root, previous, &self.targets_files(), expires, &signer, Path::new("online")).expect("snapshot")
+    }
+
+    fn timestamp(&self, previous: Option<&[u8]>, snapshot: &[u8], expires: SystemTime) -> Vec<u8> {
+        let signer = InProcessSigner(&self.online);
+        sign_timestamp(&self.root, previous, snapshot, expires, &signer, Path::new("online")).expect("timestamp")
+    }
+
+    fn verify(&self, trusted: &TrustedState, snapshot: &[u8], timestamp: &[u8]) -> Result<Verified, Refusal> {
+        let fetched = Fetched {
+            roots: Vec::new(),
+            timestamp: timestamp.to_vec(),
+            snapshot: snapshot.to_vec(),
+            targets: self.targets_files(),
+        };
+        let hashes = BTreeMap::from([("sha256".to_owned(), hex::encode(Sha256::digest(ARTIFACT)))]);
+        let artifact = Artifact { length: ARTIFACT.len() as u64, hashes };
+        verify(trusted, &fetched, PATH, &artifact, SystemTime::now())
+    }
+}
+
+fn hours(count: u64) -> Duration {
+    Duration::from_secs(count * 3_600)
+}
+
+fn version_of(file: &[u8]) -> u64 {
+    let value: Value = serde_json::from_slice(file).expect("json");
+    value["signed"]["version"].as_u64().expect("version")
+}
+
+#[test]
+fn the_online_roles_are_signed_by_one_call_each() {
+    let repository = OnlineRepository::new();
+    let later = SystemTime::now() + hours(24);
+    let snapshot = repository.snapshot(None, later);
+    let timestamp = repository.timestamp(None, &snapshot, later);
+    assert_eq!((version_of(&snapshot), version_of(&timestamp)), (1, 1));
+    let first = repository
+        .verify(&TrustedState::from_root(repository.root.clone()), &snapshot, &timestamp)
+        .expect("the signed snapshot and timestamp verify");
+
+    let refreshed = repository.timestamp(Some(&timestamp), &snapshot, later + hours(12));
+    assert_eq!(version_of(&refreshed), 2);
+    repository.verify(&first.trusted, &snapshot, &refreshed).expect("the refresh verifies after the first timestamp");
+}
+
+#[test]
+fn a_stale_or_rewound_online_file_is_refused() {
+    let repository = OnlineRepository::new();
+    let later = SystemTime::now() + hours(24);
+    let snapshot = repository.snapshot(None, later);
+    let trusted = TrustedState::from_root(repository.root.clone());
+
+    let stale = repository.timestamp(None, &snapshot, SystemTime::now() - hours(1));
+    let refusal = repository.verify(&trusted, &snapshot, &stale).expect_err("an expired timestamp");
+    assert_eq!((refusal.role.as_str(), refusal.rule.code()), ("timestamp", "expired"));
+
+    let first = repository.timestamp(None, &snapshot, later);
+    let second = repository.timestamp(Some(&first), &snapshot, later);
+    let after_second = repository.verify(&trusted, &snapshot, &second).expect("version 2 verifies").trusted;
+    let rewound = repository.timestamp(None, &snapshot, later);
+    let refusal = repository.verify(&after_second, &snapshot, &rewound).expect_err("a timestamp rewound to version 1");
+    assert_eq!((refusal.role.as_str(), refusal.rule.code()), ("timestamp", "rollback"));
+}
+
+#[test]
+fn a_failed_signer_program_reports_what_it_wrote() {
+    let scratch = Scratch::new();
+    let program = scratch.path("failing-signer");
+    fs::write(&program, "#!/bin/sh\necho 'no such key' >&2\nexit 1\n").expect("failing signer");
+    fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).expect("executable");
+    let error = SignerProgram::new(&program).sign(Path::new("missing"), NAMESPACE, b"message").expect_err("fails");
+    assert!(matches!(&error, SignerError::Failed { stderr, .. } if stderr == "no such key"), "{error:?}");
 }
 ```

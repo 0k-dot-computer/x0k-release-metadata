@@ -21,7 +21,7 @@ mod time;
 mod verify;
 
 pub use canonical::{canonical_json, key_id};
-pub use ceremony::{sign, stage, CeremonyError, Rebuild, Requirement, Standing};
+pub use ceremony::{sign, sign_snapshot, sign_timestamp, stage, CeremonyError, Rebuild, Requirement, Standing};
 pub use metadata::{
     Custody, DelegatedRole, Delegations, Key, KeyVal, ListedKey, MetaFile, PresenceFlag, RoleKeys,
     Root, SignatoryRule, Snapshot, TargetEntry, Targets, Timestamp,

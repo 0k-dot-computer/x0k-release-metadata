@@ -37,7 +37,7 @@ impl Signer for SignerProgram {
             .arg(key)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
+            .stderr(Stdio::piped())
             .spawn()
             .map_err(SignerError::Spawn)?;
         if let Some(mut stdin) = child.stdin.take() {
@@ -45,7 +45,8 @@ impl Signer for SignerProgram {
         }
         let output = child.wait_with_output().map_err(SignerError::Io)?;
         if !output.status.success() {
-            return Err(SignerError::Failed(output.status));
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+            return Err(SignerError::Failed { status: output.status, stderr });
         }
         Ok(output.stdout)
     }
@@ -53,11 +54,12 @@ impl Signer for SignerProgram {
 
 /// Why the signer program made no signature.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum SignerError {
     #[error("cannot start it: {0}")]
     Spawn(#[source] std::io::Error),
     #[error("cannot pass it the message or read its signature: {0}")]
     Io(#[source] std::io::Error),
-    #[error("it failed: {0}")]
-    Failed(ExitStatus),
+    #[error("it failed ({status}): {stderr}")]
+    Failed { status: ExitStatus, stderr: String },
 }

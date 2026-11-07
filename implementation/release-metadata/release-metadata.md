@@ -105,7 +105,7 @@ mod time;
 mod verify;
 
 pub use canonical::{canonical_json, key_id};
-pub use ceremony::{sign, stage, CeremonyError, Rebuild, Requirement, Standing};
+pub use ceremony::{sign, sign_snapshot, sign_timestamp, stage, CeremonyError, Rebuild, Requirement, Standing};
 pub use metadata::{
     Custody, DelegatedRole, Delegations, Key, KeyVal, ListedKey, MetaFile, PresenceFlag, RoleKeys,
     Root, SignatoryRule, Snapshot, TargetEntry, Targets, Timestamp,
@@ -741,7 +741,8 @@ pub struct MetaFile {
 
 TUF writes an expiry as `YYYY-MM-DDTHH:MM:SSZ` (§ "Date-time"). The crate
 parses that one form itself, in a few lines, rather than take a date crate
-for it. The current time arrives as a `SystemTime` that the embedder read,
+for it, and writes it back the same way for the snapshots and timestamps
+it signs. The current time arrives as a `SystemTime` that the embedder read,
 and a file is expired when its expiry is not later than that time.
 
 <a name="chunk-time"></a><sub>[`src/time.rs`](../../crates/x0k-release-metadata/src/time.rs) · `#time`</sub>
@@ -795,6 +796,33 @@ fn days_in_month(year: i64, month: i64) -> i64 {
         4 | 6 | 9 | 11 => 30,
         _ => 31,
     }
+}
+
+/// Writes a time in TUF's date-time form, to the second, as the online
+/// roles' expiry.
+pub(crate) fn format_utc(time: SystemTime) -> Result<String, Malformed> {
+    let seconds = time
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|since| i64::try_from(since.as_secs()).ok())
+        .ok_or_else(|| Malformed::DateTime(format!("{time:?}")))?;
+    let (days, rest) = (seconds.div_euclid(86_400), seconds.rem_euclid(86_400));
+    let (year, month, day) = civil_from_days(days);
+    let (hour, minute, second) = (rest / 3_600, rest % 3_600 / 60, rest % 60);
+    Ok(format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z"))
+}
+
+/// The date `days` after 1970-01-01, the inverse of `days_from_civil`.
+fn civil_from_days(days: i64) -> (i64, i64, i64) {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let day_of_era = z - era * 146_097;
+    let year_of_era = (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let shifted_month = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * shifted_month + 2) / 5 + 1;
+    let month = if shifted_month < 10 { shifted_month + 3 } else { shifted_month - 9 };
+    (year_of_era + era * 400 + i64::from(month <= 2), month, day)
 }
 
 /// Days from 1970-01-01 to a date in the proleptic Gregorian calendar.
@@ -2044,7 +2072,7 @@ ceremony tests a scratch directory.
 ```toml {#manifest file="Cargo.toml"}
 [package]
 name = "x0k-release-metadata"
-version = "0.1.0"
+version = "0.2.0"
 edition = { workspace = true }
 license = "MIT"
 description = "Verifies a release against a root of trust its maintainers sign: TUF metadata, thresholds of signatories, and SSHSIG signatures"

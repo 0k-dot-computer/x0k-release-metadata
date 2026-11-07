@@ -1,6 +1,6 @@
 {
   "source": "implementation/release-metadata/release-metadata.md",
-  "source_hash": "b95da02851914b12",
+  "source_hash": "0b700543521a5660",
   "pipelines": [
     {
       "kind": "identity-tangle",
@@ -9,7 +9,7 @@
       "outputs": [
         {
           "path": "crates/x0k-release-metadata/src/lib.rs",
-          "hash": "29b269aef91b38d2"
+          "hash": "609362a539378853"
         },
         {
           "path": "crates/x0k-release-metadata/src/refusal.rs",
@@ -25,7 +25,7 @@
         },
         {
           "path": "crates/x0k-release-metadata/src/time.rs",
-          "hash": "a26ac784e75ff957"
+          "hash": "017cc7e6981e7827"
         },
         {
           "path": "crates/x0k-release-metadata/src/scheme.rs",
@@ -41,7 +41,7 @@
         },
         {
           "path": "crates/x0k-release-metadata/Cargo.toml",
-          "hash": "b7c1fd9de82f5647"
+          "hash": "a9b9d5ad7f4f2780"
         },
         {
           "path": "crates/x0k-release-metadata/tests/conformance/purity.rs",

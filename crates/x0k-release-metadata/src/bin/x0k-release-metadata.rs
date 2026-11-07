@@ -6,18 +6,26 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
+use serde::Deserialize;
 use x0k_release_metadata::{
-    sign, stage, CeremonyError, DelegatedRole, Rebuild, Requirement, SignerProgram, Standing,
+    sign, sign_snapshot, sign_timestamp, stage, CeremonyError, DelegatedRole, Rebuild, Requirement, SignerProgram,
+    Standing,
 };
 
 const USAGE: &str = "\
 usage:
   x0k-release-metadata stage <body.json> <staged.json> [--role <name>]
-  x0k-release-metadata status <staged.json> --trusted <root.json> [--delegator <targets.json> --role <name>]
-  x0k-release-metadata sign <staged.json> --trusted <root.json> [--delegator <targets.json> --role <name>]
+  x0k-release-metadata status <staged.json> [--trusted <root.json>] [--delegator <targets.json> --role <name>]
+  x0k-release-metadata sign <staged.json> [--trusted <root.json>] [--delegator <targets.json> --role <name>]
       --key <key file> [--signer <program>] [--rebuilt <target path>=<file>]... [--not-reproducible]
+  x0k-release-metadata snapshot <snapshot.json> --trusted <root.json> --targets <role>.json...
+      [--previous <snapshot.json>] --expires-in <hours>h|<days>d --key <key file> [--signer <program>]
+  x0k-release-metadata timestamp <timestamp.json> --trusted <root.json> --snapshot <snapshot.json>
+      [--previous <timestamp.json>] --expires-in <hours>h|<days>d --key <key file> [--signer <program>]
+
+A root without --trusted is a first root, version 1.
 ";
 
 #[derive(Debug, thiserror::Error)]
@@ -34,6 +42,8 @@ enum CommandError {
     Ceremony(#[from] CeremonyError),
     #[error("cannot write the status: {0}")]
     Status(#[source] std::io::Error),
+    #[error("not a metadata file: {0}")]
+    NotMetadata(#[source] serde_json::Error),
 }
 
 /// The command line: positional words, and each option's values.
@@ -44,7 +54,10 @@ struct Arguments {
 }
 
 fn parse_ceremony_arguments(mut args: impl Iterator<Item = String>) -> Result<Arguments, CommandError> {
-    const WITH_VALUE: [&str; 6] = ["--trusted", "--delegator", "--role", "--key", "--signer", "--rebuilt"];
+    const WITH_VALUE: [&str; 10] = [
+        "--trusted", "--delegator", "--role", "--key", "--signer", "--rebuilt", "--targets", "--snapshot", "--previous",
+        "--expires-in",
+    ];
     let mut parsed = Arguments { positional: Vec::new(), options: BTreeMap::new(), not_reproducible: false };
     while let Some(arg) = args.next() {
         if arg == "--not-reproducible" {
@@ -83,15 +96,74 @@ fn write_ceremony_file(path: &Path, bytes: &[u8]) -> Result<(), CommandError> {
     fs::write(path, bytes).map_err(|source| CommandError::File { path: path.to_owned(), source })
 }
 
+/// A metadata file's body, read only for its kind and version.
+#[derive(Deserialize)]
+struct Header {
+    signed: HeaderBody,
+}
+
+#[derive(Deserialize)]
+struct HeaderBody {
+    #[serde(rename = "_type")]
+    kind: String,
+    #[serde(default)]
+    version: u64,
+    #[serde(default)]
+    expires: String,
+}
+
+fn header_of(bytes: &[u8]) -> Result<HeaderBody, CommandError> {
+    Ok(serde_json::from_slice::<Header>(bytes).map_err(CommandError::NotMetadata)?.signed)
+}
+
+fn optional_file(args: &Arguments, name: &str) -> Result<Option<Vec<u8>>, CommandError> {
+    args.one(name)?.map(|path| read_ceremony_file(Path::new(path))).transpose()
+}
+
+/// The requirement the staged file's kind and the given files name.
 fn requirement_for(staged: &[u8], args: &Arguments) -> Result<Requirement, CommandError> {
-    let trusted = read_ceremony_file(Path::new(args.required("--trusted")?))?;
-    let delegator = args.one("--delegator")?.map(|p| read_ceremony_file(Path::new(p))).transpose()?;
-    let delegation = match (&delegator, args.one("--role")?) {
-        (Some(bytes), Some(role)) => Some((bytes.as_slice(), role)),
-        (None, None) => None,
-        _ => return Err(CommandError::Usage("--delegator and --role go together")),
+    let kind = header_of(staged)?.kind;
+    let trusted = optional_file(args, "--trusted")?;
+    let delegator = optional_file(args, "--delegator")?;
+    let role = args.one("--role")?;
+    Ok(match (kind.as_str(), trusted, delegator, role) {
+        ("root", None, None, None) => Requirement::first_root(staged)?,
+        ("root", Some(trusted), None, None) => Requirement::next_root(staged, &trusted)?,
+        ("root", ..) => return Err(CommandError::Usage("a root takes no --delegator or --role")),
+        ("targets", Some(root), None, None) => Requirement::targets(staged, &root)?,
+        ("targets", Some(root), Some(delegator), Some(role)) => {
+            Requirement::delegated_targets(staged, &root, &delegator, role)?
+        }
+        ("targets", None, ..) => return Err(CommandError::Usage("a targets file takes --trusted <root.json>")),
+        ("targets", ..) => return Err(CommandError::Usage("--delegator and --role go together")),
+        _ => return Err(CommandError::Usage("status and sign take root and targets files")),
+    })
+}
+
+/// The expiry `--expires-in` names, from the clock now.
+fn expiry_for(args: &Arguments) -> Result<SystemTime, CommandError> {
+    let usage = CommandError::Usage("--expires-in takes <hours>h or <days>d");
+    let text = args.required("--expires-in")?;
+    let (count, unit) = match (text.strip_suffix('h'), text.strip_suffix('d')) {
+        (Some(count), _) => (count, 3_600),
+        (_, Some(count)) => (count, 86_400),
+        _ => return Err(usage),
     };
-    Ok(Requirement::new(staged, &trusted, delegation)?)
+    let seconds = count.parse::<u64>().ok().and_then(|count| count.checked_mul(unit)).ok_or(usage)?;
+    Ok(SystemTime::now() + Duration::from_secs(seconds))
+}
+
+fn signer_for(args: &Arguments) -> Result<SignerProgram, CommandError> {
+    Ok(args.one("--signer")?.map_or_else(SignerProgram::default, SignerProgram::new))
+}
+
+fn write_online(path: &str, file: &[u8]) -> Result<ExitCode, CommandError> {
+    write_ceremony_file(Path::new(path), file)?;
+    let header = header_of(file)?;
+    let mut stdout = std::io::stdout().lock();
+    writeln!(stdout, "{path}: {} version {}, expires {}", header.kind, header.version, header.expires)
+        .map_err(CommandError::Status)?;
+    Ok(ExitCode::SUCCESS)
 }
 
 fn rebuild_for(args: &Arguments) -> Result<Rebuild, CommandError> {
@@ -153,11 +225,41 @@ fn run_ceremony_command(args: &Arguments) -> Result<ExitCode, CommandError> {
             let staged = read_ceremony_file(Path::new(staged_path))?;
             let requirement = requirement_for(&staged, args)?;
             let rebuild = rebuild_for(args)?;
-            let signer = args.one("--signer")?.map_or_else(SignerProgram::default, SignerProgram::new);
+            let signer = signer_for(args)?;
             let key = Path::new(args.required("--key")?);
+            let mut stderr = std::io::stderr().lock();
+            let _ = writeln!(stderr, "signing with {}; a security key waits for a touch", key.display());
+            drop(stderr);
             let signed = sign(&staged, &requirement, &rebuild, &signer, key)?;
             write_ceremony_file(Path::new(staged_path), &signed)?;
             write_status(&requirement.standing(&signed)?, &requirement.delegations(&signed)?).map(|_| ExitCode::SUCCESS)
+        }
+        ["snapshot", out] => {
+            let root = read_ceremony_file(Path::new(args.required("--trusted")?))?;
+            let previous = optional_file(args, "--previous")?;
+            let mut targets = BTreeMap::new();
+            for path in args.options.get("--targets").map(Vec::as_slice).unwrap_or_default() {
+                let path = Path::new(path);
+                let role = path
+                    .file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .ok_or(CommandError::Usage("a --targets file is named <role>.json"))?;
+                targets.insert(role.to_owned(), read_ceremony_file(path)?);
+            }
+            if targets.is_empty() {
+                return Err(CommandError::Usage("snapshot takes at least one --targets <role>.json"));
+            }
+            let (expires, signer, key) = (expiry_for(args)?, signer_for(args)?, args.required("--key")?);
+            let file = sign_snapshot(&root, previous.as_deref(), &targets, expires, &signer, Path::new(key))?;
+            write_online(out, &file)
+        }
+        ["timestamp", out] => {
+            let root = read_ceremony_file(Path::new(args.required("--trusted")?))?;
+            let previous = optional_file(args, "--previous")?;
+            let snapshot = read_ceremony_file(Path::new(args.required("--snapshot")?))?;
+            let (expires, signer, key) = (expiry_for(args)?, signer_for(args)?, args.required("--key")?);
+            let file = sign_timestamp(&root, previous.as_deref(), &snapshot, expires, &signer, Path::new(key))?;
+            write_online(out, &file)
         }
         _ => Err(CommandError::Usage("unknown command")),
     }

@@ -7,25 +7,32 @@ use std::path::Path;
 use std::time::{Duration, SystemTime};
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Map, Value};
 use base64ct::{Base64, Encoding};
+use sha2::{Digest, Sha256};
 
 use crate::canonical::{open_envelope, Signature};
 use crate::quorum::{KeyRing, Quorum};
 use crate::scheme::{check_signature, parse_sshsig, public_identity, PublicIdentity};
 use crate::verify::hex_digest;
+use crate::time::format_utc;
 use crate::{
     parse_utc, DelegatedRole, Key, ListedKey, Malformed, Root, SignatoryRule, SignatoryVerdict,
-    SignatureFault, Signer, SignerError, Targets, NAMESPACE,
+    SignatureFault, Signer, SignerError, Snapshot, Targets, Timestamp, NAMESPACE,
 };
 
 /// Why a ceremony step did not happen.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum CeremonyError {
     #[error("malformed: {0}")]
     Malformed(#[from] Malformed),
-    #[error("people stage and sign root and targets files, not {0}")]
+    #[error("people stage root and targets files; sign_snapshot and sign_timestamp make the online roles, not stage: {0}")]
     NotSignedByPeople(String),
+    #[error("the staged file is a {found} file, not a {expected} file")]
+    WrongKind { expected: &'static str, found: String },
+    #[error("staged root version {staged} is not a first root; a first root is version 1")]
+    NotFirstVersion { staged: u64 },
     #[error("staged root version {staged} does not follow trusted version {trusted}")]
     NotNextVersion { trusted: u64, staged: u64 },
     #[error("a root is not a delegated role, so it takes no role and no delegating targets file")]
@@ -73,11 +80,25 @@ impl StagedFile {
     }
 }
 
-/// The kinds of file that people sign.
+/// The kinds of metadata file: people sign roots and targets files; the
+/// online key signs snapshots and timestamps.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Kind {
     Root,
     Targets,
+    Snapshot,
+    Timestamp,
+}
+
+impl Kind {
+    fn name(self) -> &'static str {
+        match self {
+            Kind::Root => "root",
+            Kind::Targets => "targets",
+            Kind::Snapshot => "snapshot",
+            Kind::Timestamp => "timestamp",
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -91,7 +112,9 @@ fn staged_kind(signed: &Value) -> Result<Kind, CeremonyError> {
     match field.kind.as_str() {
         "root" => Ok(Kind::Root),
         "targets" => Ok(Kind::Targets),
-        other => Err(CeremonyError::NotSignedByPeople(other.to_owned())),
+        "snapshot" => Ok(Kind::Snapshot),
+        "timestamp" => Ok(Kind::Timestamp),
+        other => Err(Malformed::WrongType { expected: "root or targets", found: other.to_owned() }.into()),
     }
 }
 
@@ -112,6 +135,7 @@ pub fn stage(body: &[u8], role: Option<&str>, now: SystemTime) -> Result<Vec<u8>
             KeyRing::new(&open_envelope::<Root>(&file)?.body.keys)?;
         }
         Kind::Targets => check_grant_end(&open_envelope::<Targets>(&file)?.body, role, now)?,
+        online => return Err(CeremonyError::NotSignedByPeople(online.name().to_owned())),
     }
     Ok(file)
 }
@@ -189,38 +213,56 @@ impl Threshold {
 }
 
 impl Requirement {
-    /// What `staged` must carry. `trusted_root` is the root the signer
-    /// trusts: for a staged root, the version before it; for a targets file,
-    /// the current root. A delegated targets role also gives the targets
-    /// file that delegates it and the role's name.
-    pub fn new(
-        staged: &[u8],
-        trusted_root: &[u8],
-        delegation: Option<(&[u8], &str)>,
-    ) -> Result<Self, CeremonyError> {
-        let kind = staged_kind(&StagedFile::read(staged)?.signed)?;
+    /// What a first root, version 1, must carry: its own root threshold (§5).
+    pub fn first_root(staged: &[u8]) -> Result<Self, CeremonyError> {
+        expect_kind(staged, Kind::Root)?;
+        let first = open_envelope::<Root>(staged)?.body;
+        if first.version != 1 {
+            return Err(CeremonyError::NotFirstVersion { staged: first.version });
+        }
+        let label = format!("root version {}", first.version);
+        Self::checked(Kind::Root, vec![Threshold::top_level(&first, "root", label)?])
+    }
+
+    /// What root version N+1 must carry: the root threshold of version N,
+    /// `trusted_root`, and its own (§5).
+    pub fn next_root(staged: &[u8], trusted_root: &[u8]) -> Result<Self, CeremonyError> {
+        expect_kind(staged, Kind::Root)?;
         let trusted = open_envelope::<Root>(trusted_root)?.body;
-        let thresholds = match (kind, delegation) {
-            (Kind::Root, Some(_)) => return Err(CeremonyError::RootIsNotDelegated),
-            (Kind::Root, None) => {
-                let next = open_envelope::<Root>(staged)?.body;
-                if trusted.version.checked_add(1) != Some(next.version) {
-                    return Err(CeremonyError::NotNextVersion { trusted: trusted.version, staged: next.version });
-                }
-                vec![
-                    Threshold::top_level(&trusted, "root", format!("root version {}", trusted.version))?,
-                    Threshold::top_level(&next, "root", format!("root version {}", next.version))?,
-                ]
-            }
-            (Kind::Targets, None) => vec![Threshold::top_level(&trusted, "targets", "targets".to_owned())?],
-            (Kind::Targets, Some((delegator, role))) => {
-                let mut threshold = Threshold::delegated(&trusted, delegator, role)?;
-                if trusted.public_audiences.contains(role) && open_envelope::<Targets>(staged)?.body.delegates() {
-                    threshold.threshold = threshold.with_quorum(|quorum| quorum.signatory_count())?;
-                }
-                vec![threshold]
-            }
-        };
+        let next = open_envelope::<Root>(staged)?.body;
+        if trusted.version.checked_add(1) != Some(next.version) {
+            return Err(CeremonyError::NotNextVersion { trusted: trusted.version, staged: next.version });
+        }
+        Self::checked(
+            Kind::Root,
+            vec![
+                Threshold::top_level(&trusted, "root", format!("root version {}", trusted.version))?,
+                Threshold::top_level(&next, "root", format!("root version {}", next.version))?,
+            ],
+        )
+    }
+
+    /// What the top-level targets file must carry under `root`.
+    pub fn targets(staged: &[u8], root: &[u8]) -> Result<Self, CeremonyError> {
+        expect_kind(staged, Kind::Targets)?;
+        let root = open_envelope::<Root>(root)?.body;
+        Self::checked(Kind::Targets, vec![Threshold::top_level(&root, "targets", "targets".to_owned())?])
+    }
+
+    /// What delegated role `role`'s file must carry, under `root` and the
+    /// targets file `delegator` that delegates it.
+    pub fn delegated_targets(staged: &[u8], root: &[u8], delegator: &[u8], role: &str) -> Result<Self, CeremonyError> {
+        expect_kind(staged, Kind::Targets)?;
+        let root = open_envelope::<Root>(root)?.body;
+        let mut threshold = Threshold::delegated(&root, delegator, role)?;
+        if root.public_audiences.contains(role) && open_envelope::<Targets>(staged)?.body.delegates() {
+            threshold.threshold = threshold.with_quorum(|quorum| quorum.signatory_count())?;
+        }
+        Self::checked(Kind::Targets, vec![threshold])
+    }
+
+    /// A requirement whose every threshold the verifier's own quorum accepts.
+    fn checked(kind: Kind, thresholds: Vec<Threshold>) -> Result<Self, CeremonyError> {
         for threshold in &thresholds {
             threshold.with_quorum(|_| ())?;
         }
@@ -255,8 +297,25 @@ impl Requirement {
                     targets: Some(envelope.body),
                 }
             }
+            Kind::Snapshot => {
+                let envelope = open_envelope::<Snapshot>(staged)?;
+                Opened { canonical: envelope.canonical, signatures: envelope.signatures, targets: None }
+            }
+            Kind::Timestamp => {
+                let envelope = open_envelope::<Timestamp>(staged)?;
+                Opened { canonical: envelope.canonical, signatures: envelope.signatures, targets: None }
+            }
         })
     }
+}
+
+/// Refuses a staged file that is not of the kind a constructor checks.
+fn expect_kind(staged: &[u8], expected: Kind) -> Result<(), CeremonyError> {
+    let found = staged_kind(&StagedFile::read(staged)?.signed)?;
+    if found != expected {
+        return Err(CeremonyError::WrongKind { expected: expected.name(), found: found.name().to_owned() });
+    }
+    Ok(())
 }
 
 /// A staged file opened as the verifier opens it.
@@ -394,4 +453,73 @@ impl Rebuild {
         }
         Ok(())
     }
+}
+
+/// The TUF specification version the files this crate writes declare.
+const SPEC_VERSION: &str = "1.0.37";
+
+/// Builds and signs a snapshot that lists `targets`, every targets file by
+/// role name (`targets` and each delegated role), through `signer` with the
+/// key that `key` names (§6). Its version is one more than `previous`'s, or
+/// 1, and it expires at `expires`.
+pub fn sign_snapshot(
+    root: &[u8],
+    previous: Option<&[u8]>,
+    targets: &BTreeMap<String, Vec<u8>>,
+    expires: SystemTime,
+    signer: &dyn Signer,
+    key: &Path,
+) -> Result<Vec<u8>, CeremonyError> {
+    let mut meta = Map::new();
+    for (role, bytes) in targets {
+        let version = open_envelope::<Targets>(bytes)?.body.version;
+        meta.insert(format!("{role}.json"), meta_entry(version, bytes));
+    }
+    let version = match previous {
+        Some(previous) => open_envelope::<Snapshot>(previous)?.body.version.saturating_add(1),
+        None => 1,
+    };
+    let body = json!({
+        "_type": "snapshot", "spec_version": SPEC_VERSION, "version": version,
+        "expires": format_utc(expires)?, "meta": meta,
+    });
+    sign_online(Kind::Snapshot, root, body, signer, key)
+}
+
+/// Builds and signs a timestamp that lists `snapshot`, through `signer`
+/// with the key that `key` names (§6). Its version is one more than
+/// `previous`'s, or 1, and it expires at `expires`. Called with the current
+/// timestamp as `previous` and the same snapshot, it is the refresh.
+pub fn sign_timestamp(
+    root: &[u8],
+    previous: Option<&[u8]>,
+    snapshot: &[u8],
+    expires: SystemTime,
+    signer: &dyn Signer,
+    key: &Path,
+) -> Result<Vec<u8>, CeremonyError> {
+    let snapshot_version = open_envelope::<Snapshot>(snapshot)?.body.version;
+    let version = match previous {
+        Some(previous) => open_envelope::<Timestamp>(previous)?.body.version.saturating_add(1),
+        None => 1,
+    };
+    let body = json!({
+        "_type": "timestamp", "spec_version": SPEC_VERSION, "version": version,
+        "expires": format_utc(expires)?,
+        "meta": { "snapshot.json": meta_entry(snapshot_version, snapshot) },
+    });
+    sign_online(Kind::Timestamp, root, body, signer, key)
+}
+
+/// One listed file: its version, length and SHA-256.
+fn meta_entry(version: u64, bytes: &[u8]) -> Value {
+    json!({ "version": version, "length": bytes.len(), "hashes": { "sha256": hex::encode(Sha256::digest(bytes)) } })
+}
+
+fn sign_online(kind: Kind, root: &[u8], body: Value, signer: &dyn Signer, key: &Path) -> Result<Vec<u8>, CeremonyError> {
+    let file = StagedFile { signed: body, signatures: Vec::new() }.write()?;
+    let root = open_envelope::<Root>(root)?.body;
+    let role = kind.name();
+    let requirement = Requirement::checked(kind, vec![Threshold::top_level(&root, role, role.to_owned())?])?;
+    sign(&file, &requirement, &Rebuild::Rebuilt(BTreeMap::new()), signer, key)
 }

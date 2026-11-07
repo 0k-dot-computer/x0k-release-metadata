@@ -426,7 +426,9 @@ dependence on a pull request:
    thresholds are met.
 
 No signer sees the key of another signer. The keys of the root role sign
-only roots.
+only roots. A first root, version 1, has no earlier version, so only its
+own threshold applies, and the same ceremony signs it one signatory after
+another; each reader pins it at install (§1).
 
 <a name="folio-instance-78306b3a746563686e652f7369676e2d612d726f6f742d6f6e652d7369676e61746f72792d61742d612d74696d65-5"></a><sub data-instance-iri="x0k:techne/sign-a-root-one-signatory-at-a-time" data-concept-iri="https://0k.computer/ontology#Techne" data-source-document="corpora/x0k/decisions/architecture/delivery/release-metadata.md"><strong>Techne</strong> · Unresolved instance · <code>x0k:techne/sign-a-root-one-signatory-at-a-time</code> · <a href="#folio-source-78306b3a746563686e652f7369676e2d612d726f6f742d6f6e652d7369676e61746f72792d61742d612d74696d65-5">source declaration</a> · the graph block at line 178 is not Turtle: The prefix open-question: has not been declared at corpora/x0k/decisions/architecture/delivery/release-metadata.md:177</sub><a name="folio-source-78306b3a746563686e652f7369676e2d612d726f6f742d6f6e652d7369676e61746f72792d61742d612d74696d65-5"></a>
 
@@ -455,7 +457,11 @@ The timestamp expires soon, so a key must sign a new one often. A person
 cannot sign it each day, so a key on the build server signs it. That key
 is one software `ed25519` key, and it signs both the snapshot and the
 timestamp roles. The build server keeps it in its secret store, and it is
-the only release secret on the build server. A thief with this key can
+the only release secret on the build server. The package builds the
+snapshot from the targets files it lists and the timestamp from the
+snapshot, and signs each through the signer program of §7, so the build
+server's scheduled refresh is one command; signed that way, the online
+key's object uses the `sshsig-ssh-ed25519` scheme. A thief with this key can
 sign a new timestamp for an old snapshot. That makes a freeze last longer,
 but it cannot make a reader accept an artifact that a maintainer did not
 sign.

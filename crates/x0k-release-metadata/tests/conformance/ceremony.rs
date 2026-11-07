@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -16,7 +16,8 @@ use ssh_key::private::Ed25519Keypair;
 use ssh_key::public::KeyData;
 use ssh_key::{HashAlg, LineEnding, PrivateKey, PublicKey, SshSig};
 use x0k_release_metadata::{
-    canonical_json, key_id, parse_utc, verify, Artifact, Fetched, Refusal, TrustedState, Verified, NAMESPACE,
+    canonical_json, key_id, parse_utc, sign_snapshot, sign_timestamp, verify, Artifact, Fetched, Refusal, Signer,
+    SignerError, SignerProgram, TrustedState, Verified, NAMESPACE,
 };
 
 const PROGRAM: &str = env!("CARGO_BIN_EXE_x0k-release-metadata");
@@ -106,6 +107,7 @@ impl Scratch {
         let script = format!(
             "#!/bin/sh\n\
              printf '%s\\n' \"$*\" >> '{dir}/calls'\n\
+             echo 'Signing data on standard input' >&2\n\
              cat > '{dir}/message'\n\
              cat \"$6.sig\"\n"
         );
@@ -184,7 +186,7 @@ fn targets_body(entries: &[&str], delegations: Option<Value>) -> Value {
 }
 
 /// A reader that trusts `trusted_root` updates to `new_root` and looks up the artifact.
-fn reader_update(trusted_root: Vec<u8>, new_root: Vec<u8>, alice: &SignatoryKey, online: &OnlineKey) -> Result<Verified, Refusal> {
+fn reader_update(trusted_root: Vec<u8>, new_roots: Vec<Vec<u8>>, alice: &SignatoryKey, online: &OnlineKey) -> Result<Verified, Refusal> {
     let bytes = |value: &Value| serde_json::to_vec(value).expect("json");
     let targets = targets_body(&[PATH], None);
     let targets = bytes(&envelope(&targets, vec![alice.signature(&message(&targets))]));
@@ -199,7 +201,7 @@ fn reader_update(trusted_root: Vec<u8>, new_root: Vec<u8>, alice: &SignatoryKey,
     });
     let timestamp = bytes(&envelope(&timestamp, vec![online.signature(&message(&timestamp))]));
     let fetched = Fetched {
-        roots: vec![new_root],
+        roots: new_roots,
         timestamp,
         snapshot,
         targets: BTreeMap::from([("targets".to_owned(), targets)]),
@@ -307,7 +309,7 @@ fn a_root_signed_one_signatory_at_a_time_shows_who_is_missing_until_both_thresho
 
     let trusted = fs::read(&ceremony.trusted).expect("root 1");
     let signed = fs::read(&ceremony.staged).expect("root 2");
-    let verified = reader_update(trusted, signed.clone(), &ceremony.alice, &ceremony.online).expect("a reader walks to root 2");
+    let verified = reader_update(trusted, vec![signed.clone()], &ceremony.alice, &ceremony.online).expect("a reader walks to root 2");
     assert_eq!(verified.trusted.root, signed);
 }
 
@@ -316,6 +318,7 @@ fn the_sign_command_signs_only_through_the_signer_program_it_is_given() {
     let ceremony = RootCeremony::new();
     let signed = ceremony.sign("root-2");
     assert!(signed.status.success(), "{}", stderr(&signed));
+    assert!(!stderr(&signed).contains("Signing data on standard input"), "the signer's chatter leaked: {}", stderr(&signed));
     let key = text(&ceremony.scratch.path("root-2"));
     assert_eq!(ceremony.scratch.calls(), vec![format!("-Y sign -n release-metadata -f {key}")]);
     assert_eq!(fs::read(ceremony.scratch.path("message")).expect("recorded message"), message(&ceremony.next));
@@ -326,6 +329,7 @@ fn the_sign_command_signs_only_through_the_signer_program_it_is_given() {
     let before = fs::read(&ceremony.staged).expect("staged");
     let failed = ceremony.sign("nobody");
     assert_eq!(failed.status.code(), Some(2), "{}", stdout(&failed));
+    assert!(stderr(&failed).contains("Signing data on standard input"), "a failed signer's output is shown: {}", stderr(&failed));
     assert_eq!(ceremony.scratch.calls().len(), 2);
     assert_eq!(fs::read(&ceremony.staged).expect("staged"), before);
 }
@@ -468,4 +472,161 @@ fn the_status_shows_each_delegations_patterns_and_key_ids() {
     assert_eq!(status.status.code(), Some(1), "{}", stderr(&status));
     let line = format!("delegates chariot-1.1: paths fleet/chariot-1.1-*; keys {}; threshold 1", session.id);
     assert!(stdout(&status).contains(&line), "{}", stdout(&status));
+}
+
+#[test]
+fn a_first_root_is_signed_one_signatory_at_a_time() {
+    let scratch = Scratch::new();
+    let keys = [SignatoryKey::new(1, "root-1"), SignatoryKey::new(2, "root-2")];
+    let alice = SignatoryKey::new(20, "alice");
+    let online = OnlineKey::new();
+    let first = root_body(1, &[&keys[0], &keys[1]], &alice, &online);
+    let body = text(&scratch.put("1.root.body.json", &first));
+    let staged = text(&scratch.path("1.root.json"));
+    let staging = scratch.run(&["stage", &body, &staged]);
+    assert!(staging.status.success(), "{}", stderr(&staging));
+    let signer = text(&scratch.stub_signer(&[&keys[0], &keys[1]], &message(&first)));
+    let status = || scratch.run(&["status", &staged]);
+    let sign = |key: &str| scratch.run(&["sign", &staged, "--key", &text(&scratch.path(key)), "--signer", &signer]);
+
+    let unsigned = status();
+    assert_eq!(unsigned.status.code(), Some(1), "{}", stderr(&unsigned));
+    assert!(stdout(&unsigned).contains("root version 1: 0 of 2 signatories count; missing root-1, root-2"), "{}", stdout(&unsigned));
+    let one = sign("root-1");
+    assert!(one.status.success(), "{}", stderr(&one));
+    let half = status();
+    assert_eq!(half.status.code(), Some(1), "one of two signatories is not the threshold: {}", stdout(&half));
+    assert!(stdout(&half).contains("root version 1: 1 of 2 signatories count; missing root-2"), "{}", stdout(&half));
+    let two = sign("root-2");
+    assert!(two.status.success(), "{}", stderr(&two));
+    let done = status();
+    assert_eq!(done.status.code(), Some(0), "{}", stdout(&done));
+    assert!(stdout(&done).contains("root version 1: 2 of 2 signatories count; met"), "{}", stdout(&done));
+
+    let root = fs::read(&staged).expect("root 1");
+    reader_update(root, Vec::new(), &alice, &online).expect("a reader starts from the signed first root");
+}
+
+/// Signs in process with a software SSH key, the way `ssh-keygen -Y sign` does.
+struct InProcessSigner<'a>(&'a SignatoryKey);
+
+impl Signer for InProcessSigner<'_> {
+    fn sign(&self, _key: &Path, namespace: &str, message: &[u8]) -> Result<Vec<u8>, SignerError> {
+        let envelope = self.0.private.sign(namespace, HashAlg::Sha512, message).expect("sshsig");
+        Ok(envelope.to_pem(LineEnding::LF).expect("armor").into_bytes())
+    }
+}
+
+/// A root whose snapshot and timestamp roles are the SSH key `online`, with
+/// one targets file that Alice signed and that lists the artifact.
+struct OnlineRepository {
+    root: Vec<u8>,
+    targets: Vec<u8>,
+    online: SignatoryKey,
+}
+
+impl OnlineRepository {
+    fn new() -> Self {
+        let root_keys = [SignatoryKey::new(1, "root-1"), SignatoryKey::new(2, "root-2")];
+        let alice = SignatoryKey::new(20, "alice");
+        let online = SignatoryKey::new(10, "online");
+        let mut keys: Map<String, Value> = root_keys.iter().map(|k| (k.id.clone(), k.object.clone())).collect();
+        keys.insert(alice.id.clone(), alice.object.clone());
+        keys.insert(online.id.clone(), online.object.clone());
+        let root_ids: Vec<&str> = root_keys.iter().map(|k| k.id.as_str()).collect();
+        let root = json!({
+            "_type": "root", "spec_version": "1.0.37", "consistent_snapshot": false,
+            "version": 1, "expires": LATER, "keys": keys,
+            "roles": {
+                "root": { "keyids": root_ids, "threshold": 2 },
+                "timestamp": { "keyids": [online.id], "threshold": 1 },
+                "snapshot": { "keyids": [online.id], "threshold": 1 },
+                "targets": { "keyids": [alice.id], "threshold": 1 },
+            },
+        });
+        let targets = targets_body(&[PATH], None);
+        let targets = envelope(&targets, vec![alice.signature(&message(&targets))]);
+        let bytes = |value: &Value| serde_json::to_vec(value).expect("json");
+        Self { root: bytes(&envelope(&root, Vec::new())), targets: bytes(&targets), online }
+    }
+
+    fn targets_files(&self) -> BTreeMap<String, Vec<u8>> {
+        BTreeMap::from([("targets".to_owned(), self.targets.clone())])
+    }
+
+    fn snapshot(&self, previous: Option<&[u8]>, expires: SystemTime) -> Vec<u8> {
+        let signer = InProcessSigner(&self.online);
+        sign_snapshot(&self.root, previous, &self.targets_files(), expires, &signer, Path::new("online")).expect("snapshot")
+    }
+
+    fn timestamp(&self, previous: Option<&[u8]>, snapshot: &[u8], expires: SystemTime) -> Vec<u8> {
+        let signer = InProcessSigner(&self.online);
+        sign_timestamp(&self.root, previous, snapshot, expires, &signer, Path::new("online")).expect("timestamp")
+    }
+
+    fn verify(&self, trusted: &TrustedState, snapshot: &[u8], timestamp: &[u8]) -> Result<Verified, Refusal> {
+        let fetched = Fetched {
+            roots: Vec::new(),
+            timestamp: timestamp.to_vec(),
+            snapshot: snapshot.to_vec(),
+            targets: self.targets_files(),
+        };
+        let hashes = BTreeMap::from([("sha256".to_owned(), hex::encode(Sha256::digest(ARTIFACT)))]);
+        let artifact = Artifact { length: ARTIFACT.len() as u64, hashes };
+        verify(trusted, &fetched, PATH, &artifact, SystemTime::now())
+    }
+}
+
+fn hours(count: u64) -> Duration {
+    Duration::from_secs(count * 3_600)
+}
+
+fn version_of(file: &[u8]) -> u64 {
+    let value: Value = serde_json::from_slice(file).expect("json");
+    value["signed"]["version"].as_u64().expect("version")
+}
+
+#[test]
+fn the_online_roles_are_signed_by_one_call_each() {
+    let repository = OnlineRepository::new();
+    let later = SystemTime::now() + hours(24);
+    let snapshot = repository.snapshot(None, later);
+    let timestamp = repository.timestamp(None, &snapshot, later);
+    assert_eq!((version_of(&snapshot), version_of(&timestamp)), (1, 1));
+    let first = repository
+        .verify(&TrustedState::from_root(repository.root.clone()), &snapshot, &timestamp)
+        .expect("the signed snapshot and timestamp verify");
+
+    let refreshed = repository.timestamp(Some(&timestamp), &snapshot, later + hours(12));
+    assert_eq!(version_of(&refreshed), 2);
+    repository.verify(&first.trusted, &snapshot, &refreshed).expect("the refresh verifies after the first timestamp");
+}
+
+#[test]
+fn a_stale_or_rewound_online_file_is_refused() {
+    let repository = OnlineRepository::new();
+    let later = SystemTime::now() + hours(24);
+    let snapshot = repository.snapshot(None, later);
+    let trusted = TrustedState::from_root(repository.root.clone());
+
+    let stale = repository.timestamp(None, &snapshot, SystemTime::now() - hours(1));
+    let refusal = repository.verify(&trusted, &snapshot, &stale).expect_err("an expired timestamp");
+    assert_eq!((refusal.role.as_str(), refusal.rule.code()), ("timestamp", "expired"));
+
+    let first = repository.timestamp(None, &snapshot, later);
+    let second = repository.timestamp(Some(&first), &snapshot, later);
+    let after_second = repository.verify(&trusted, &snapshot, &second).expect("version 2 verifies").trusted;
+    let rewound = repository.timestamp(None, &snapshot, later);
+    let refusal = repository.verify(&after_second, &snapshot, &rewound).expect_err("a timestamp rewound to version 1");
+    assert_eq!((refusal.role.as_str(), refusal.rule.code()), ("timestamp", "rollback"));
+}
+
+#[test]
+fn a_failed_signer_program_reports_what_it_wrote() {
+    let scratch = Scratch::new();
+    let program = scratch.path("failing-signer");
+    fs::write(&program, "#!/bin/sh\necho 'no such key' >&2\nexit 1\n").expect("failing signer");
+    fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).expect("executable");
+    let error = SignerProgram::new(&program).sign(Path::new("missing"), NAMESPACE, b"message").expect_err("fails");
+    assert!(matches!(&error, SignerError::Failed { stderr, .. } if stderr == "no such key"), "{error:?}");
 }
