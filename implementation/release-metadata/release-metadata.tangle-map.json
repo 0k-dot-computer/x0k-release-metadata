@@ -1,6 +1,6 @@
 {
   "source": "implementation/release-metadata/release-metadata.md",
-  "source_hash": "0b700543521a5660",
+  "source_hash": "2e3c4b1c4c3770fb",
   "pipelines": [
     {
       "kind": "identity-tangle",
@@ -41,7 +41,7 @@
         },
         {
           "path": "crates/x0k-release-metadata/Cargo.toml",
-          "hash": "a9b9d5ad7f4f2780"
+          "hash": "ff2eaf69dd86c7ce"
         },
         {
           "path": "crates/x0k-release-metadata/tests/conformance/purity.rs",

@@ -748,13 +748,18 @@ The commands sign through a program with `ssh-keygen -Y sign`'s interface
 standard input and the armored signature on its standard output. git signs
 commits through the same interface (`gpg.ssh.program`). `ssh-keygen` is the
 default, and it reaches a FIDO2 token, a key file or an SSH agent such as
-Secretive. The program's standard error is captured: `ssh-keygen` writes
-"Signing data on standard input" for every signature, which a scheduled
-job does not want, so the error output appears only in the error when the
-program fails. A passphrase prompt goes to the terminal itself, not to
-standard error, and still reaches the signer; a security key's "confirm
-user presence" line does not, so the `sign` command says before it signs
-that a security key may wait for a touch.
+Secretive. The program's standard error is read line by line as the
+program writes it. An embedder that signs in front of a person hands
+`SignerProgram::with_output` a sink, and each line reaches it while the
+program still runs: a security key's "Confirm user presence for key …"
+appears while the key waits for its touch. Without a sink nothing is
+shown, so a scheduled job that refreshes the timestamp stays quiet,
+though `ssh-keygen` writes "Signing data on standard input" for every
+signature. Either way the text is kept, and a program that fails returns
+it in its error. A passphrase prompt goes to the terminal itself, not to
+standard error, and reaches the signer regardless. Only the signer
+program knows whether a key waits for a touch, so the embedder shows the
+program's own line instead of a guess of its own.
 
 `Signer` is the library's seam: an embedder can sign some other way, such
 as x0k's approver client, and the commands use `SignerProgram`. This is
@@ -764,9 +769,12 @@ the one file of the crate that runs a program.
 
 ```rust {#signer file="src/signer.rs"}
 use std::ffi::OsString;
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
+use std::panic::RefUnwindSafe;
 use std::path::Path;
 use std::process::{Command, ExitStatus, Stdio};
+use std::sync::Arc;
+use std::thread;
 
 /// Makes an SSHSIG signature, as `ssh-keygen -Y sign` does (decision §7).
 pub trait Signer {
@@ -775,16 +783,40 @@ pub trait Signer {
     fn sign(&self, key: &Path, namespace: &str, message: &[u8]) -> Result<Vec<u8>, SignerError>;
 }
 
+/// Where the lines of a signer program's standard error go, one at a time.
+/// `RefUnwindSafe` keeps `SignerProgram` as unwind-safe as it was without a
+/// sink.
+type OutputSink = Arc<dyn Fn(&str) + Send + Sync + RefUnwindSafe>;
+
 /// A program called as `<program> -Y sign -n <namespace> -f <key>`, with the
 /// message on its standard input and the signature on its standard output.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SignerProgram {
     program: OsString,
+    output: Option<OutputSink>,
 }
 
 impl SignerProgram {
     pub fn new(program: impl Into<OsString>) -> Self {
-        Self { program: program.into() }
+        Self { program: program.into(), output: None }
+    }
+
+    /// Hands each line the program writes to its standard error to `sink`
+    /// while the program runs, such as a security key's request for a
+    /// touch. Without a sink the program's standard error is shown nowhere
+    /// and kept only for a failure.
+    pub fn with_output(mut self, sink: impl Fn(&str) + Send + Sync + RefUnwindSafe + 'static) -> Self {
+        self.output = Some(Arc::new(sink));
+        self
+    }
+}
+
+impl std::fmt::Debug for SignerProgram {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SignerProgram")
+            .field("program", &self.program)
+            .field("output", &self.output.as_ref().map(|_| "sink"))
+            .finish()
     }
 }
 
@@ -804,12 +836,25 @@ impl Signer for SignerProgram {
             .stderr(Stdio::piped())
             .spawn()
             .map_err(SignerError::Spawn)?;
+        let (stderr, sink) = (child.stderr.take(), self.output.clone());
+        let reader = thread::spawn(move || {
+            let mut text = String::new();
+            for line in stderr.map(BufReader::new).into_iter().flat_map(BufRead::lines).map_while(Result::ok) {
+                if let Some(sink) = &sink {
+                    sink(&line);
+                }
+                text.push_str(&line);
+                text.push('\n');
+            }
+            text
+        });
         if let Some(mut stdin) = child.stdin.take() {
             stdin.write_all(message).map_err(SignerError::Io)?;
         }
         let output = child.wait_with_output().map_err(SignerError::Io)?;
+        let stderr = reader.join().unwrap_or_default();
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+            let stderr = stderr.trim().to_owned();
             return Err(SignerError::Failed { status: output.status, stderr });
         }
         Ok(output.stdout)
@@ -1060,8 +1105,12 @@ fn expiry_for(args: &Arguments) -> Result<SystemTime, CommandError> {
     Ok(SystemTime::now() + Duration::from_secs(seconds))
 }
 
+/// The signer program, with its standard error passed to the terminal's.
 fn signer_for(args: &Arguments) -> Result<SignerProgram, CommandError> {
-    Ok(args.one("--signer")?.map_or_else(SignerProgram::default, SignerProgram::new))
+    let program = args.one("--signer")?.map_or_else(SignerProgram::default, SignerProgram::new);
+    Ok(program.with_output(|line| {
+        let _ = writeln!(std::io::stderr(), "{line}");
+    }))
 }
 
 fn write_online(path: &str, file: &[u8]) -> Result<ExitCode, CommandError> {
@@ -1134,9 +1183,6 @@ fn run_ceremony_command(args: &Arguments) -> Result<ExitCode, CommandError> {
             let rebuild = rebuild_for(args)?;
             let signer = signer_for(args)?;
             let key = Path::new(args.required("--key")?);
-            let mut stderr = std::io::stderr().lock();
-            let _ = writeln!(stderr, "signing with {}; a security key waits for a touch", key.display());
-            drop(stderr);
             let signed = sign(&staged, &requirement, &rebuild, &signer, key)?;
             write_ceremony_file(Path::new(staged_path), &signed)?;
             write_status(&requirement.standing(&signed)?, &requirement.delegations(&signed)?).map(|_| ExitCode::SUCCESS)
@@ -1192,6 +1238,8 @@ Unix only.
 | `the_status_shows_each_delegations_patterns_and_key_ids` | §8 | The status of a staged version that delegates shows each delegation's patterns and key ids, so the signers review what they grant. |
 | `the_online_roles_are_signed_by_one_call_each` | §6 | `sign_snapshot` and `sign_timestamp` sign a snapshot and a timestamp that verify, and a refresh over the same snapshot is version 2 and verifies after version 1. |
 | `a_stale_or_rewound_online_file_is_refused` | §6 | A timestamp signed with an expiry in the past is refused as expired, and one rewound to version 1 after version 2 as a rollback. |
+| `a_signer_programs_lines_reach_the_sink_before_it_returns` | §7 | Each line the signer program writes to its standard error reaches the embedder's sink while the program still runs, and a failure keeps the text. |
+| `a_signer_without_a_sink_prints_nothing` | §7 | With no sink, the signer program's standard error prints nowhere: a scheduled job stays quiet. |
 | `a_failed_signer_program_reports_what_it_wrote` | §7 | A signer program that fails has its error output in the error, and a signer that succeeds prints nothing. |
 | `a_first_root_is_signed_one_signatory_at_a_time` | §5 | A first root is staged and signed one signatory after another; its status says 1 of 2 until the second signs, then met, and readers start from the result. |
 | `a_targets_entry_that_differs_from_the_signers_rebuild_is_not_signed` | §6 | `sign` refuses a targets file whose entry differs from the signer's rebuild, naming both hashes, and refuses one with no rebuild; the signer program is not called; the matching rebuild is signed. |
@@ -1206,6 +1254,7 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ed25519_dalek::{Signer as _, SigningKey};
@@ -1554,7 +1603,7 @@ fn the_sign_command_signs_only_through_the_signer_program_it_is_given() {
     let ceremony = RootCeremony::new();
     let signed = ceremony.sign("root-2");
     assert!(signed.status.success(), "{}", stderr(&signed));
-    assert!(!stderr(&signed).contains("Signing data on standard input"), "the signer's chatter leaked: {}", stderr(&signed));
+    assert!(stderr(&signed).contains("Signing data on standard input"), "the signer program's own output reaches the terminal: {}", stderr(&signed));
     let key = text(&ceremony.scratch.path("root-2"));
     assert_eq!(ceremony.scratch.calls(), vec![format!("-Y sign -n release-metadata -f {key}")]);
     assert_eq!(fs::read(ceremony.scratch.path("message")).expect("recorded message"), message(&ceremony.next));
@@ -1865,5 +1914,72 @@ fn a_failed_signer_program_reports_what_it_wrote() {
     fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).expect("executable");
     let error = SignerProgram::new(&program).sign(Path::new("missing"), NAMESPACE, b"message").expect_err("fails");
     assert!(matches!(&error, SignerError::Failed { stderr, .. } if stderr == "no such key"), "{error:?}");
+}
+
+/// Writes an executable shell script into the scratch directory.
+fn script(scratch: &Scratch, name: &str, body: &str) -> PathBuf {
+    let path = scratch.path(name);
+    fs::write(&path, format!("#!/bin/sh\n{body}")).expect("script");
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("executable");
+    path
+}
+
+#[test]
+fn a_signer_programs_lines_reach_the_sink_before_it_returns() {
+    let scratch = Scratch::new();
+    let go = text(&scratch.path("go"));
+    // The stub prints its prompt, then waits until the sink has seen it; a
+    // line delivered only after the program ended would never let it finish.
+    let program = script(
+        &scratch,
+        "prompting-signer",
+        &format!(
+            "cat > /dev/null\necho 'Confirm user presence for key ED25519-SK' >&2\n\
+             i=0\nwhile [ ! -e '{go}' ]; do i=$((i+1)); [ $i -gt 200 ] && exit 3; sleep 0.05; done\necho signed\n"
+        ),
+    );
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let (sink_seen, sink_go) = (Arc::clone(&seen), go.clone());
+    let signer = SignerProgram::new(&program).with_output(move |line| {
+        sink_seen.lock().expect("lines").push(line.to_owned());
+        if line.starts_with("Confirm user presence") {
+            fs::write(&sink_go, b"").expect("go");
+        }
+    });
+    let signature = signer.sign(Path::new("key"), NAMESPACE, b"message").expect("signs once the sink has the prompt");
+    assert_eq!(signature, b"signed\n");
+    assert_eq!(*seen.lock().expect("lines"), ["Confirm user presence for key ED25519-SK"]);
+
+    let failing = script(&scratch, "failing-signer", "cat > /dev/null\necho 'no such key' >&2\nexit 1\n");
+    let lines = Arc::new(Mutex::new(Vec::new()));
+    let sink_lines = Arc::clone(&lines);
+    let error = SignerProgram::new(&failing)
+        .with_output(move |line| sink_lines.lock().expect("lines").push(line.to_owned()))
+        .sign(Path::new("key"), NAMESPACE, b"message")
+        .expect_err("fails");
+    assert!(matches!(&error, SignerError::Failed { stderr, .. } if stderr == "no such key"), "{error:?}");
+    assert_eq!(*lines.lock().expect("lines"), ["no such key"]);
+}
+
+#[test]
+fn a_signer_without_a_sink_prints_nothing() {
+    const CHILD: &str = "X0K_RELEASE_METADATA_QUIET_CHILD";
+    if let Some(program) = std::env::var_os(CHILD) {
+        // The child run: sign through a stub that writes to its standard
+        // error, with no sink, and let the parent read this process's output.
+        let signature = SignerProgram::new(program).sign(Path::new("key"), NAMESPACE, b"message").expect("signs");
+        assert_eq!(signature, b"signed\n");
+        return;
+    }
+    let scratch = Scratch::new();
+    let program = script(&scratch, "chatty-signer", "cat > /dev/null\necho 'Signing data on standard input' >&2\necho signed\n");
+    let child = Command::new(std::env::current_exe().expect("this test binary"))
+        .args(["--exact", "ceremony::a_signer_without_a_sink_prints_nothing", "--nocapture", "--test-threads", "1"])
+        .env(CHILD, &program)
+        .output()
+        .expect("the child run");
+    assert!(child.status.success(), "{}", stderr(&child));
+    assert!(stdout(&child).contains("1 passed"), "the child ran the signing: {}", stdout(&child));
+    assert!(!stderr(&child).contains("Signing data on standard input"), "a quiet signer printed: {}", stderr(&child));
 }
 ```

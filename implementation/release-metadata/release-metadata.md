@@ -2072,7 +2072,7 @@ ceremony tests a scratch directory.
 ```toml {#manifest file="Cargo.toml"}
 [package]
 name = "x0k-release-metadata"
-version = "0.2.0"
+version = "0.2.1"
 edition = { workspace = true }
 license = "MIT"
 description = "Verifies a release against a root of trust its maintainers sign: TUF metadata, thresholds of signatories, and SSHSIG signatures"

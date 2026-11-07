@@ -153,8 +153,12 @@ fn expiry_for(args: &Arguments) -> Result<SystemTime, CommandError> {
     Ok(SystemTime::now() + Duration::from_secs(seconds))
 }
 
+/// The signer program, with its standard error passed to the terminal's.
 fn signer_for(args: &Arguments) -> Result<SignerProgram, CommandError> {
-    Ok(args.one("--signer")?.map_or_else(SignerProgram::default, SignerProgram::new))
+    let program = args.one("--signer")?.map_or_else(SignerProgram::default, SignerProgram::new);
+    Ok(program.with_output(|line| {
+        let _ = writeln!(std::io::stderr(), "{line}");
+    }))
 }
 
 fn write_online(path: &str, file: &[u8]) -> Result<ExitCode, CommandError> {
@@ -227,9 +231,6 @@ fn run_ceremony_command(args: &Arguments) -> Result<ExitCode, CommandError> {
             let rebuild = rebuild_for(args)?;
             let signer = signer_for(args)?;
             let key = Path::new(args.required("--key")?);
-            let mut stderr = std::io::stderr().lock();
-            let _ = writeln!(stderr, "signing with {}; a security key waits for a touch", key.display());
-            drop(stderr);
             let signed = sign(&staged, &requirement, &rebuild, &signer, key)?;
             write_ceremony_file(Path::new(staged_path), &signed)?;
             write_status(&requirement.standing(&signed)?, &requirement.delegations(&signed)?).map(|_| ExitCode::SUCCESS)

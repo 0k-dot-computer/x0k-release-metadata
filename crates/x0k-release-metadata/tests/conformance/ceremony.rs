@@ -6,6 +6,7 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ed25519_dalek::{Signer as _, SigningKey};
@@ -318,7 +319,7 @@ fn the_sign_command_signs_only_through_the_signer_program_it_is_given() {
     let ceremony = RootCeremony::new();
     let signed = ceremony.sign("root-2");
     assert!(signed.status.success(), "{}", stderr(&signed));
-    assert!(!stderr(&signed).contains("Signing data on standard input"), "the signer's chatter leaked: {}", stderr(&signed));
+    assert!(stderr(&signed).contains("Signing data on standard input"), "the signer program's own output reaches the terminal: {}", stderr(&signed));
     let key = text(&ceremony.scratch.path("root-2"));
     assert_eq!(ceremony.scratch.calls(), vec![format!("-Y sign -n release-metadata -f {key}")]);
     assert_eq!(fs::read(ceremony.scratch.path("message")).expect("recorded message"), message(&ceremony.next));
@@ -629,4 +630,71 @@ fn a_failed_signer_program_reports_what_it_wrote() {
     fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).expect("executable");
     let error = SignerProgram::new(&program).sign(Path::new("missing"), NAMESPACE, b"message").expect_err("fails");
     assert!(matches!(&error, SignerError::Failed { stderr, .. } if stderr == "no such key"), "{error:?}");
+}
+
+/// Writes an executable shell script into the scratch directory.
+fn script(scratch: &Scratch, name: &str, body: &str) -> PathBuf {
+    let path = scratch.path(name);
+    fs::write(&path, format!("#!/bin/sh\n{body}")).expect("script");
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("executable");
+    path
+}
+
+#[test]
+fn a_signer_programs_lines_reach_the_sink_before_it_returns() {
+    let scratch = Scratch::new();
+    let go = text(&scratch.path("go"));
+    // The stub prints its prompt, then waits until the sink has seen it; a
+    // line delivered only after the program ended would never let it finish.
+    let program = script(
+        &scratch,
+        "prompting-signer",
+        &format!(
+            "cat > /dev/null\necho 'Confirm user presence for key ED25519-SK' >&2\n\
+             i=0\nwhile [ ! -e '{go}' ]; do i=$((i+1)); [ $i -gt 200 ] && exit 3; sleep 0.05; done\necho signed\n"
+        ),
+    );
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let (sink_seen, sink_go) = (Arc::clone(&seen), go.clone());
+    let signer = SignerProgram::new(&program).with_output(move |line| {
+        sink_seen.lock().expect("lines").push(line.to_owned());
+        if line.starts_with("Confirm user presence") {
+            fs::write(&sink_go, b"").expect("go");
+        }
+    });
+    let signature = signer.sign(Path::new("key"), NAMESPACE, b"message").expect("signs once the sink has the prompt");
+    assert_eq!(signature, b"signed\n");
+    assert_eq!(*seen.lock().expect("lines"), ["Confirm user presence for key ED25519-SK"]);
+
+    let failing = script(&scratch, "failing-signer", "cat > /dev/null\necho 'no such key' >&2\nexit 1\n");
+    let lines = Arc::new(Mutex::new(Vec::new()));
+    let sink_lines = Arc::clone(&lines);
+    let error = SignerProgram::new(&failing)
+        .with_output(move |line| sink_lines.lock().expect("lines").push(line.to_owned()))
+        .sign(Path::new("key"), NAMESPACE, b"message")
+        .expect_err("fails");
+    assert!(matches!(&error, SignerError::Failed { stderr, .. } if stderr == "no such key"), "{error:?}");
+    assert_eq!(*lines.lock().expect("lines"), ["no such key"]);
+}
+
+#[test]
+fn a_signer_without_a_sink_prints_nothing() {
+    const CHILD: &str = "X0K_RELEASE_METADATA_QUIET_CHILD";
+    if let Some(program) = std::env::var_os(CHILD) {
+        // The child run: sign through a stub that writes to its standard
+        // error, with no sink, and let the parent read this process's output.
+        let signature = SignerProgram::new(program).sign(Path::new("key"), NAMESPACE, b"message").expect("signs");
+        assert_eq!(signature, b"signed\n");
+        return;
+    }
+    let scratch = Scratch::new();
+    let program = script(&scratch, "chatty-signer", "cat > /dev/null\necho 'Signing data on standard input' >&2\necho signed\n");
+    let child = Command::new(std::env::current_exe().expect("this test binary"))
+        .args(["--exact", "ceremony::a_signer_without_a_sink_prints_nothing", "--nocapture", "--test-threads", "1"])
+        .env(CHILD, &program)
+        .output()
+        .expect("the child run");
+    assert!(child.status.success(), "{}", stderr(&child));
+    assert!(stdout(&child).contains("1 passed"), "the child ran the signing: {}", stdout(&child));
+    assert!(!stderr(&child).contains("Signing data on standard input"), "a quiet signer printed: {}", stderr(&child));
 }
