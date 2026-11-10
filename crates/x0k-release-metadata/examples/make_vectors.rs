@@ -12,7 +12,7 @@ use ssh_encoding::Encode;
 use ssh_key::private::Ed25519Keypair;
 use ssh_key::public::KeyData;
 use ssh_key::{HashAlg, PrivateKey, PublicKey};
-use x0k_release_metadata::{canonical_json, key_id, NAMESPACE};
+use x0k_release_metadata::{canonical_json, key_id, BATCH_NAMESPACE, NAMESPACE};
 
 const NOW: &str = "2026-11-05T00:00:00Z";
 const LATER: &str = "2030-01-01T00:00:00Z";
@@ -38,7 +38,8 @@ struct TestKey {
 #[derive(Clone)]
 enum Signer {
     Ed25519(SigningKey),
-    Sshsig(PrivateKey, &'static str),
+    /// An SSH key, and the namespace a vector makes it sign under instead of the usual one.
+    Sshsig(PrivateKey, Option<&'static str>),
     /// A software stand-in for a hardware signer, with its key's wire encoding.
     Hardware { wire: Vec<u8>, kind: Hardware },
 }
@@ -63,7 +64,7 @@ impl TestKey {
     fn sshsig_line(seed: u8, edit: impl FnOnce(String) -> String) -> Self {
         let pair = Ed25519Keypair::from_seed(&[seed; 32]);
         let line = PublicKey::from(KeyData::Ed25519(pair.public)).to_openssh().expect("key line");
-        let signer = Signer::Sshsig(PrivateKey::from(pair), NAMESPACE);
+        let signer = Signer::Sshsig(PrivateKey::from(pair), None);
         Self::new("ssh-ed25519", "sshsig-ssh-ed25519", edit(line), signer)
     }
 
@@ -82,23 +83,33 @@ impl TestKey {
     fn under_namespace(&self, namespace: &'static str) -> Self {
         let mut key = self.clone();
         if let Signer::Sshsig(_, ns) = &mut key.signer {
-            *ns = namespace;
+            *ns = Some(namespace);
         }
         key
     }
 
-    fn sign(&self, message: &[u8]) -> Value {
-        let sig = match &self.signer {
+    /// The signature over `message`, in hex, under `namespace` unless the key says otherwise.
+    fn sig(&self, namespace: &'static str, message: &[u8]) -> String {
+        match &self.signer {
             Signer::Ed25519(key) => hex::encode(key.sign(message).to_bytes()),
-            Signer::Sshsig(key, namespace) => {
-                let envelope = key.sign(namespace, HashAlg::Sha512, message).expect("sshsig");
+            Signer::Sshsig(key, instead) => {
+                let envelope = key.sign(instead.unwrap_or(namespace), HashAlg::Sha512, message).expect("sshsig");
                 let mut blob = Vec::new();
                 envelope.encode(&mut blob).expect("sshsig encoding");
                 hex::encode(blob)
             }
-            Signer::Hardware { wire, kind } => hex::encode(kind.sshsig(wire, message)),
-        };
-        json!({ "keyid": self.id, "sig": sig })
+            Signer::Hardware { wire, kind } => hex::encode(kind.sshsig(wire, namespace, message)),
+        }
+    }
+
+    fn sign(&self, message: &[u8]) -> Value {
+        json!({ "keyid": self.id, "sig": self.sig(NAMESPACE, message) })
+    }
+
+    /// A batch signature entry over `statement`, which it carries.
+    fn sign_batch(&self, statement: &Value) -> Value {
+        let message = canonical_json(statement).expect("canonical statement");
+        json!({ "keyid": self.id, "sig": self.sig(BATCH_NAMESPACE, &message), "x-release-metadata-batch": statement })
     }
 }
 
@@ -157,10 +168,11 @@ impl TestKey {
 }
 
 impl Hardware {
-    /// The SSHSIG envelope this signer writes over `message`, for the key `public`.
-    fn sshsig(&self, public: &[u8], message: &[u8]) -> Vec<u8> {
+    /// The SSHSIG envelope this signer writes over `message` under
+    /// `namespace`, for the key `public`.
+    fn sshsig(&self, public: &[u8], namespace: &str, message: &[u8]) -> Vec<u8> {
         let mut signed = b"SSHSIG".to_vec();
-        signed.extend(ssh_wire(&[NAMESPACE.as_bytes(), b"", b"sha512", &Sha512::digest(message)]));
+        signed.extend(ssh_wire(&[namespace.as_bytes(), b"", b"sha512", &Sha512::digest(message)]));
         let token_data = |flags: u8| sk_data(TOKEN_APPLICATION, flags, &Sha256::digest(&signed));
         let blob = match self {
             Hardware::Enclave(key) => ssh_wire(&[b"ecdsa-sha2-nistp256", &p256_signature(key, &signed)]),
@@ -185,7 +197,7 @@ impl Hardware {
         };
         let mut envelope = b"SSHSIG".to_vec();
         envelope.extend(1u32.to_be_bytes());
-        envelope.extend(ssh_wire(&[public, NAMESPACE.as_bytes(), b"", b"sha512", &blob]));
+        envelope.extend(ssh_wire(&[public, namespace.as_bytes(), b"", b"sha512", &blob]));
         envelope
     }
 }
@@ -372,6 +384,32 @@ fn meta(version: u64, bytes: &[u8]) -> Value {
     json!({ "version": version, "length": bytes.len(), "hashes": { "sha256": hex::encode(Sha256::digest(bytes)) } })
 }
 
+fn batch_listing(role: &str, body: &Value) -> Value {
+    let sha256 = hex::encode(Sha256::digest(canonical_json(body).expect("canonical body")));
+    json!({ "_type": body["_type"], "role": role, "version": body["version"], "hashes": { "sha256": sha256 } })
+}
+
+/// `files`, each a role and its body, signed by `key` with one batch
+/// signature over a statement that `edit` may change first.
+fn batch_signed(files: &[(&str, Value)], key: &TestKey, edit: impl FnOnce(&mut Value)) -> Vec<Value> {
+    let listings: Vec<Value> = files.iter().map(|(role, body)| batch_listing(role, body)).collect();
+    let mut statement = json!({ "_type": "release-metadata-batch", "files": listings });
+    edit(&mut statement);
+    let signature = key.sign_batch(&statement);
+    files.iter().map(|(_, body)| json!({ "signed": body, "signatures": [signature] })).collect()
+}
+
+/// A trusted root whose snapshot and timestamp roles are `key`, a releaser,
+/// so `key` signs a release in one batch (decision §6).
+fn root_releasing(cast: &Cast, key: &TestKey) -> Value {
+    let root_keys = [&cast.root[0], &cast.root[1]];
+    let mut body = root_body(cast, 1, &root_keys, json!({}));
+    for role in ["snapshot", "timestamp"] {
+        body["roles"][role] = json!({ "keyids": [key.id], "threshold": 1 });
+    }
+    signed(body, &root_keys)
+}
+
 struct Parts {
     trusted_root: Value,
     roots: Vec<(u64, Value)>,
@@ -384,6 +422,21 @@ struct Parts {
     timestamp_version: u64,
     timestamp_expires: &'static str,
     path: &'static str,
+    /// The key that signs `fleet`, the snapshot and the timestamp in one
+    /// batch, when the vector is a release made in one step.
+    release_by: Option<TestKey>,
+    /// What a release vector puts on disk as `fleet.json`.
+    fleet_on_disk: OnDisk,
+}
+
+/// The `fleet.json` a release vector writes.
+enum OnDisk {
+    /// The file the batch signed.
+    Signed,
+    /// Another body of the same version, carrying the batch's signature.
+    BodyWithBatchSignature(Value),
+    /// Another whole file.
+    File(Value),
 }
 
 impl Parts {
@@ -400,6 +453,8 @@ impl Parts {
             timestamp_version: 1,
             timestamp_expires: LATER,
             path: FLEET_PATH,
+            release_by: None,
+            fleet_on_disk: OnDisk::Signed,
         }
     }
 }
@@ -448,6 +503,10 @@ fn write(out: &Path, cast: &Cast, vector: Vector) {
     let mut snapshot_meta = Map::new();
     let named = [("targets", &parts.targets), ("fleet", &parts.fleet), ("pilot", &parts.pilot)];
     for (role, file) in named.into_iter().chain(parts.extra.iter().map(|(role, file)| (*role, file))) {
+        if parts.release_by.is_some() && role == "fleet" {
+            snapshot_meta.insert("fleet.json".to_owned(), json!({ "version": file["signed"]["version"] }));
+            continue;
+        }
         put(&format!("fetched/{role}.json"), file);
         snapshot_meta.insert(format!("{role}.json"), meta(1, &bytes(file)));
     }
@@ -455,9 +514,31 @@ fn write(out: &Path, cast: &Cast, vector: Vector) {
         "_type": "snapshot", "spec_version": "1.0.37", "version": 1, "expires": LATER,
         "meta": snapshot_meta,
     });
-    let snapshot = bytes(&signed(snapshot_body, &[&cast.online]));
+    let snapshot = match &parts.release_by {
+        None => {
+            let snapshot = bytes(&signed(snapshot_body, &[&cast.online]));
+            put("fetched/timestamp.json", &timestamp(cast, parts.timestamp_version, parts.timestamp_expires, &snapshot));
+            snapshot
+        }
+        Some(key) => {
+            let timestamp_body = json!({
+                "_type": "timestamp", "spec_version": "1.0.37", "version": parts.timestamp_version,
+                "expires": parts.timestamp_expires, "meta": { "snapshot.json": { "version": 1 } },
+            });
+            let fleet = parts.fleet["signed"].clone();
+            let files = [("fleet", fleet), ("snapshot", snapshot_body), ("timestamp", timestamp_body)];
+            let [fleet, snapshot, timestamp] = <[Value; 3]>::try_from(batch_signed(&files, key, |_| {})).expect("three files");
+            let fleet = match parts.fleet_on_disk {
+                OnDisk::Signed => fleet,
+                OnDisk::BodyWithBatchSignature(body) => json!({ "signed": body, "signatures": fleet["signatures"] }),
+                OnDisk::File(file) => file,
+            };
+            put("fetched/fleet.json", &fleet);
+            put("fetched/timestamp.json", &timestamp);
+            bytes(&snapshot)
+        }
+    };
     fs::write(dir.join("fetched/snapshot.json"), &snapshot).expect("write snapshot");
-    put("fetched/timestamp.json", &timestamp(cast, parts.timestamp_version, parts.timestamp_expires, &snapshot));
     if let Some(version) = parts.trusted_timestamp_version {
         put("trusted/timestamp.json", &timestamp(cast, version, LATER, &snapshot));
     }
@@ -518,6 +599,25 @@ fn vectors(c: &Cast) -> Vec<Vector> {
         ..Parts::base(c)
     };
     let root_with = |extra: &[&TestKey]| signed(root_body_listing(c, 1, &[&r[0], &r[1]], extra, json!({})), &[&r[0], &r[1]]);
+    let heidi = TestKey::ed25519(60, "heidi", "software");
+    let both_by = |key: &TestKey, edit: &dyn Fn(&mut Value)| {
+        let files = [("fleet", audience(&[FLEET_PATH])), ("pilot", audience(&[]))];
+        let mut signed = batch_signed(&files, key, |statement| edit(statement)).into_iter();
+        (signed.next().expect("fleet"), signed.next().expect("pilot"))
+    };
+    let batch_parts = |key: &TestKey, edit: &dyn Fn(&mut Value)| {
+        let (fleet, pilot) = both_by(key, edit);
+        Parts { targets: listing_only(key), fleet, pilot, ..Parts::base(c) }
+    };
+    let as_is = |_: &mut Value| {};
+    let fleet_entry = |change: fn(&mut Value)| move |statement: &mut Value| change(&mut statement["files"][0]);
+    let other_fleet_body = || audience(&[FLEET_PATH, OTHER_VERSION_PATH]);
+    let release_parts = |on_disk: OnDisk| Parts {
+        trusted_root: root_releasing(c, &c.carol),
+        release_by: Some(c.carol.clone()),
+        fleet_on_disk: on_disk,
+        ..Parts::base(c)
+    };
     vec![
         Vector {
             name: "s1-baseline-verifies", decision: "§1",
@@ -754,7 +854,7 @@ fn vectors(c: &Cast) -> Vec<Vector> {
             claim: "The same token's signature with the touch flag counts (software-made).",
             expect: verified("fleet"),
             parts: Parts {
-                trusted_root: root_ruling(dave_needs_touch),
+                trusted_root: root_ruling(dave_needs_touch.clone()),
                 targets: listing_only(&dave_touched),
                 fleet: fleet_by(&[&dave_touched]),
                 ..Parts::base(c)
@@ -888,6 +988,109 @@ fn vectors(c: &Cast) -> Vec<Vector> {
                 roots: vec![(2, signed(tuf_root(c, 2, &[&r[2], &r[3]]), &[&r[2], &r[3]]))],
                 ..tuf_base()
             },
+        },
+        Vector {
+            name: "s3-batch-ed25519-verifies", decision: "§3",
+            claim: "One TUF ed25519 signature over a batch statement that lists fleet and pilot counts on fleet.",
+            expect: verified("fleet"), parts: batch_parts(&heidi, &as_is),
+        },
+        Vector {
+            name: "s3-batch-sshsig-verifies", decision: "§3",
+            claim: "One SSHSIG signature under release-metadata-batch over a statement that lists fleet and pilot counts on fleet.",
+            expect: verified("fleet"), parts: batch_parts(&c.carol, &as_is),
+        },
+        Vector {
+            name: "s3-batch-software-enclave-verifies", decision: "§3",
+            claim: "A P-256 SSHSIG batch signature, the kind a Secure Enclave key makes, counts on each file its statement lists (software-made).",
+            expect: verified("fleet"), parts: batch_parts(&frank, &as_is),
+        },
+        Vector {
+            name: "s3-batch-software-fido2-ed25519-verifies", decision: "§3",
+            claim: "An sk-ssh-ed25519 batch signature over the U2F blob of the statement counts (software-made).",
+            expect: verified("fleet"), parts: batch_parts(&dave_touched, &as_is),
+        },
+        Vector {
+            name: "s3-batch-software-fido2-ecdsa-verifies", decision: "§3",
+            claim: "An sk-ecdsa-sha2-nistp256 batch signature over the U2F blob of the statement counts (software-made).",
+            expect: verified("fleet"), parts: batch_parts(&erin, &as_is),
+        },
+        Vector {
+            name: "s3-batch-software-passkey-verifies", decision: "§3",
+            claim: "A WebAuthn batch signature, whose client data carries the statement's SSHSIG blob as its challenge, counts (software-made).",
+            expect: verified("fleet"), parts: batch_parts(&grace, &as_is),
+        },
+        Vector {
+            name: "s3-batch-under-single-namespace", decision: "§3",
+            claim: "A batch signature made under the namespace release-metadata does not count.",
+            expect: refused("fleet", "threshold"),
+            parts: batch_parts(&c.carol.under_namespace(NAMESPACE), &as_is),
+        },
+        Vector {
+            name: "s3-single-under-batch-namespace", decision: "§3",
+            claim: "A signature over one file made under the namespace release-metadata-batch does not count.",
+            expect: refused("fleet", "threshold"),
+            parts: Parts { fleet: fleet_by(&[&c.carol.under_namespace(BATCH_NAMESPACE)]), ..Parts::base(c) },
+        },
+        Vector {
+            name: "s3-batch-file-not-listed", decision: "§3",
+            claim: "A batch signature on a file its statement does not list does not count.",
+            expect: refused("fleet", "threshold"),
+            parts: batch_parts(&c.carol, &|statement: &mut Value| {
+                statement["files"].as_array_mut().expect("files").remove(0);
+            }),
+        },
+        Vector {
+            name: "s3-batch-wrong-body-hash", decision: "§3",
+            claim: "A batch signature whose statement lists another hash of the file's body does not count.",
+            expect: refused("fleet", "threshold"),
+            parts: batch_parts(&c.carol, &fleet_entry(|entry| entry["hashes"]["sha256"] = json!("00".repeat(32)))),
+        },
+        Vector {
+            name: "s3-batch-wrong-version", decision: "§3",
+            claim: "A batch signature whose statement lists another version of the file does not count.",
+            expect: refused("fleet", "threshold"),
+            parts: batch_parts(&c.carol, &fleet_entry(|entry| entry["version"] = json!(2))),
+        },
+        Vector {
+            name: "s3-batch-wrong-role", decision: "§3",
+            claim: "A batch signature whose statement lists the file's body under another role does not count.",
+            expect: refused("fleet", "threshold"),
+            parts: batch_parts(&c.carol, &fleet_entry(|entry| entry["role"] = json!("stable"))),
+        },
+        Vector {
+            name: "s3-batch-wrong-type", decision: "§3",
+            claim: "A batch signature whose statement lists the file's body under another type does not count.",
+            expect: refused("fleet", "threshold"),
+            parts: batch_parts(&c.carol, &fleet_entry(|entry| entry["_type"] = json!("snapshot"))),
+        },
+        Vector {
+            name: "s4-batch-touch-missing", decision: "§4",
+            claim: "A token's batch signature without the touch flag does not count for a signatory whose rule demands one (software-made).",
+            expect: refused("fleet", "threshold"),
+            parts: Parts { trusted_root: root_ruling(dave_needs_touch.clone()), ..batch_parts(&dave_untouched, &as_is) },
+        },
+        Vector {
+            name: "s4-batch-touch-present", decision: "§4",
+            claim: "The same token's batch signature with the touch flag counts on each file (software-made).",
+            expect: verified("fleet"),
+            parts: Parts { trusted_root: root_ruling(dave_needs_touch.clone()), ..batch_parts(&dave_touched, &as_is) },
+        },
+        Vector {
+            name: "s6-batch-release-verifies", decision: "§6",
+            claim: "A release whose fleet file, snapshot and timestamp one key signs in one batch verifies; the snapshot lists fleet and the timestamp lists the snapshot by version only.",
+            expect: verified("fleet"), parts: release_parts(OnDisk::Signed),
+        },
+        Vector {
+            name: "s6-version-only-other-file-signed-by-its-role", decision: "§6",
+            claim: "Under a snapshot that lists fleet by version only, another fleet file of that version verifies when the fleet role's signatories signed it.",
+            expect: verified("fleet"),
+            parts: release_parts(OnDisk::File(signed(other_fleet_body(), &[&c.alice_laptop]))),
+        },
+        Vector {
+            name: "s6-version-only-other-file-unsigned", decision: "§6",
+            claim: "Another fleet file of that version that carries only the release's batch signature is refused: the statement names the signed body's hash.",
+            expect: refused("fleet", "threshold"),
+            parts: release_parts(OnDisk::BodyWithBatchSignature(other_fleet_body())),
         },
     ]
 }

@@ -3,7 +3,7 @@
 ```turtle folio:document
 implementation:release-metadata\/hardware-kit a x0k:Implementation ;
     x0k:status "draft" ;
-    x0k:summary "The kit an operator runs once on a Mac to make one conformance vector per hardware scheme, signed by the real signer: fresh FIDO2 keys through ssh-keygen, a fresh Secure Enclave key through Secretive, and a passkey through a local WebAuthn page, each signed through the crate's own ceremony." ;
+    x0k:summary "The kit an operator runs once on a Mac to make one conformance vector per hardware scheme, signed by the real signer: fresh FIDO2 keys through ssh-keygen, a fresh Secure Enclave key through Secretive, and a passkey through a local WebAuthn page, each signed through the crate's own ceremony, one file at a time or two files with one batch signature." ;
     x0k:concerns "trust", "signing", "keys", "conformance", "ceremony" ;
     x0k:cites implementation:release-metadata\/release-metadata,
         implementation:release-metadata\/vectors,
@@ -50,6 +50,7 @@ hardware key signs it.
 //!
 //! Run by kit/sign-hardware-vectors.sh; see the hardware-kit chapter.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
@@ -80,8 +81,10 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let words: Vec<&str> = args.iter().map(String::as_str).collect();
     let outcome = match words.as_slice() {
-        ["prepare", dir, public, custody] => prepare_vector(Path::new(dir), public, custody, false),
-        ["prepare", dir, public, custody, "--touch"] => prepare_vector(Path::new(dir), public, custody, true),
+        ["prepare", dir, public, custody, flags @ ..] if flags.iter().all(|f| ["--touch", "--batch"].contains(f)) => {
+            let shape = Shape { touch: flags.contains(&"--touch"), batch: flags.contains(&"--batch") };
+            prepare_vector(Path::new(dir), public, custody, shape)
+        }
         ["challenge", staged] => print_challenge(Path::new(staged)),
         ["check-assertion", assertion] => check_assertion(Path::new(assertion)),
         ["finish", dir, claim] => finish_vector(Path::new(dir), claim),
@@ -96,7 +99,7 @@ fn main() {
 
 #[derive(Debug, thiserror::Error)]
 enum KitError {
-    #[error("usage: hardware_kit prepare <vector dir> <key.pub> <custody> [--touch] | challenge <staged.json> | check-assertion <assertion.json> | finish <vector dir> <claim> | -Y sign -n <namespace> -f <assertion.json>")]
+    #[error("usage: hardware_kit prepare <vector dir> <key.pub> <custody> [--touch] [--batch] | challenge <staged.json> | check-assertion <assertion.json> | finish <vector dir> <claim> | -Y sign -n <namespace> -f <assertion.json>")]
     Usage,
     #[error("{path}: {source}")]
     File { path: PathBuf, source: std::io::Error },
@@ -187,12 +190,23 @@ fn kit_cast() -> Cast {
 
 `prepare` writes the vector's trusted root, its top-level targets and the
 unsigned `fleet` body with the artifact beside it. The kit then stages and
-signs that body with the ceremony.
+signs that body with the ceremony. A batch vector also delegates `pilot/*`
+to the hardware key and writes an unsigned `pilot` body, and the kit signs
+both files with one call to `sign`, so the device signs a batch statement
+once (decision §3).
 
 <a name="chunk-kit-prepare"></a><sub>[`examples/hardware_kit.rs`](../../crates/x0k-release-metadata/examples/hardware_kit.rs) · `#kit-prepare`</sub>
 
 ```rust {#kit-prepare}
-fn prepare_vector(dir: &Path, public: &str, custody: &str, touch: bool) -> Result<(), KitError> {
+/// What a hardware vector proves besides the scheme: the touch rule, and
+/// one batch signature over two files.
+struct Shape {
+    touch: bool,
+    batch: bool,
+}
+
+fn prepare_vector(dir: &Path, public: &str, custody: &str, shape: Shape) -> Result<(), KitError> {
+    let Shape { touch, batch } = shape;
     let line = String::from_utf8_lossy(&read_kit_file(Path::new(public))?).trim().to_owned();
     let (hardware_id, hardware) = hardware_key(&line, custody)?;
     let c = kit_cast();
@@ -213,12 +227,13 @@ fn prepare_vector(dir: &Path, public: &str, custody: &str, touch: bool) -> Resul
         "x-release-metadata-signatories": rules,
     });
     let hardware_listing: Map<String, Value> = [(hardware_id.clone(), hardware)].into_iter().collect();
+    let audience = |name: &str| {
+        json!({ "name": name, "keyids": [hardware_id], "threshold": 1, "terminating": true, "paths": [format!("{name}/*")] })
+    };
+    let roles = if batch { vec![audience("fleet"), audience("pilot")] } else { vec![audience("fleet")] };
     let targets = json!({
         "_type": "targets", "spec_version": "1.0.37", "version": 1, "expires": LATER, "targets": {},
-        "delegations": {
-            "keys": hardware_listing,
-            "roles": [{ "name": "fleet", "keyids": [hardware_id], "threshold": 1, "terminating": true, "paths": ["fleet/*"] }],
-        },
+        "delegations": { "keys": hardware_listing, "roles": roles },
     });
     let entry = json!({
         "length": ARTIFACT.len(),
@@ -231,15 +246,20 @@ fn prepare_vector(dir: &Path, public: &str, custody: &str, touch: bool) -> Resul
     write_kit_file(&dir.join("trusted/root.json"), &pretty_json(&signed(root, &[&c.root[0], &c.root[1]])))?;
     write_kit_file(&dir.join("fetched/targets.json"), &pretty_json(&signed(targets, &[&c.targets])))?;
     write_kit_file(&dir.join("fleet.body.json"), &pretty_json(&fleet))?;
+    if batch {
+        let pilot = json!({ "_type": "targets", "spec_version": "1.0.37", "version": 1, "expires": LATER, "targets": {} });
+        write_kit_file(&dir.join("pilot.body.json"), &pretty_json(&pilot))?;
+    }
     write_kit_file(&dir.join("artifact.tar"), ARTIFACT)
 }
 ```
 
-`finish` runs after the ceremony has signed `fetched/fleet.json`. It
-writes the snapshot and the timestamp over the files as they are, and the
-case, then verifies the vector with the crate itself and prints the
-outcome. It removes the body and the artifact, so the directory holds only
-what a vector holds.
+`finish` runs after the ceremony has signed `fetched/fleet.json`, and
+`fetched/pilot.json` for a batch vector. It writes the snapshot over every
+targets file there and the timestamp over the snapshot, and the case, then
+verifies the vector with the crate itself and prints the outcome. It
+removes the bodies and the artifact, so the directory holds only what a
+vector holds.
 
 <a name="chunk-kit-finish"></a><sub>[`examples/hardware_kit.rs`](../../crates/x0k-release-metadata/examples/hardware_kit.rs) · `#kit-finish`</sub>
 
@@ -250,11 +270,16 @@ fn kit_meta(bytes: &[u8]) -> Value {
 
 fn finish_vector(dir: &Path, claim: &str) -> Result<(), KitError> {
     let c = kit_cast();
-    let targets = read_kit_file(&dir.join("fetched/targets.json"))?;
-    let fleet = read_kit_file(&dir.join("fetched/fleet.json"))?;
+    let mut files = BTreeMap::new();
+    for role in ["targets", "fleet", "pilot"] {
+        let path = dir.join(format!("fetched/{role}.json"));
+        if role != "pilot" || path.exists() {
+            files.insert(role.to_owned(), read_kit_file(&path)?);
+        }
+    }
+    let meta: Map<String, Value> = files.iter().map(|(role, bytes)| (format!("{role}.json"), kit_meta(bytes))).collect();
     let snapshot = json!({
-        "_type": "snapshot", "spec_version": "1.0.37", "version": 1, "expires": LATER,
-        "meta": { "targets.json": kit_meta(&targets), "fleet.json": kit_meta(&fleet) },
+        "_type": "snapshot", "spec_version": "1.0.37", "version": 1, "expires": LATER, "meta": meta,
     });
     let snapshot = pretty_json(&signed(snapshot, &[&c.online]));
     let timestamp = json!({
@@ -273,18 +298,13 @@ fn finish_vector(dir: &Path, claim: &str) -> Result<(), KitError> {
         "expect": { "verified": { "role": "fleet" } },
     });
     write_kit_file(&dir.join("case.json"), &pretty_json(&case))?;
-    let fetched = Fetched {
-        roots: Vec::new(),
-        timestamp,
-        snapshot,
-        targets: [("targets".to_owned(), targets), ("fleet".to_owned(), fleet)].into(),
-    };
+    let fetched = Fetched { roots: Vec::new(), timestamp, snapshot, targets: files };
     let trusted = TrustedState::from_root(read_kit_file(&dir.join("trusted/root.json"))?);
     let artifact = Artifact { length: ARTIFACT.len() as u64, hashes: [("sha256".to_owned(), sha256)].into() };
     let now = parse_utc(NOW).map_err(|e| KitError::Refused(e.to_string()))?;
     let verified = verify(&trusted, &fetched, PATH, &artifact, now)
         .map_err(|refusal| KitError::Refused(format!("the vector does not verify: {refusal}")))?;
-    for leftover in ["fleet.body.json", "artifact.tar"] {
+    for leftover in ["fleet.body.json", "pilot.body.json", "artifact.tar"] {
         let _ = fs::remove_file(dir.join(leftover));
     }
     let _ = writeln!(std::io::stdout(), "{}: verified by role {}", dir.display(), verified.target.role);
@@ -303,8 +323,12 @@ challenge, and prints the authenticator data, the client data, the
 signature and the key line as one JSON object.
 
 The challenge is the SSHSIG blob of the staged body, the bytes an SSHSIG
-signer signs, which `challenge` prints in unpadded base64url. The kit is
-then the signer program for `sign`: called as
+signer signs, which `challenge` prints in unpadded base64url. A batch
+signs a statement that `sign` builds, so its challenge comes from `sign`
+itself: called before the assertion is saved, the kit's signer prints the
+blob of the message it was given as the challenge, and makes no
+signature; the operator signs it on the page and runs `sign` again. The
+kit is the signer program for `sign`: called as
 `hardware_kit -Y sign -n release-metadata -f <assertion.json>`, it reads
 the message on its standard input, checks that the assertion's challenge
 is that message's blob, that the authenticator signed for the key's
@@ -371,18 +395,24 @@ fn kit_refusal(why: &str) -> KitError {
     KitError::Refused(why.to_owned())
 }
 
-fn webauthn_sign(namespace: &str, assertion: &Path) -> Result<(), KitError> {
-    let assertion: Assertion = serde_json::from_slice(&read_kit_file(assertion)?)?;
+fn webauthn_sign(namespace: &str, assertion_path: &Path) -> Result<(), KitError> {
     let mut message = Vec::new();
     std::io::stdin()
         .read_to_end(&mut message)
         .map_err(|source| KitError::File { path: PathBuf::from("<stdin>"), source })?;
+    let blob = sshsig_blob(namespace, &message);
+    if !fs::metadata(assertion_path).is_ok_and(|meta| meta.len() > 0) {
+        let challenge = Base64UrlUnpadded::encode_string(&blob);
+        let _ = writeln!(std::io::stderr(), "challenge: {challenge}");
+        let wanted = assertion_path.display();
+        return Err(KitError::Refused(format!("no assertion yet: sign the challenge on the passkey page, save it as {wanted}, and sign again")));
+    }
+    let assertion: Assertion = serde_json::from_slice(&read_kit_file(assertion_path)?)?;
     let decode = |text: &str| Base64UrlUnpadded::decode_vec(text.trim_end_matches('=')).map_err(|_| kit_refusal("bad base64url"));
     let authenticator_data = decode(&assertion.authenticator_data)?;
     let client_data = decode(&assertion.client_data_json)?;
     let der = decode(&assertion.signature)?;
     let parsed: ClientData = serde_json::from_slice(&client_data)?;
-    let blob = sshsig_blob(namespace, &message);
     if decode(&parsed.challenge)? != blob {
         return Err(kit_refusal("the passkey signed another challenge than this staged file's"));
     }
@@ -561,7 +591,10 @@ document.getElementById("sign").onclick = async () => {
 `kit/sign-hardware-vectors.sh` runs the whole kit. It takes the output
 directory, which must not exist yet, and the schemes to sign, and it
 writes one vector directory per scheme into it, plus the fresh keys under
-`keys/`. Each step says what the operator does: touch the token, approve
+`keys/`. Each `batch-` scheme signs a batch vector, `hw-batch-<scheme>`:
+the device signs `fleet.json` and `pilot.json` with one call to `sign`.
+`batch-enclave` asks for the public line of a Secretive key made for
+vectors, and refuses `chariot-root`. Each step says what the operator does: touch the token, approve
 in Secretive, or act in the browser. Where the operator saves a file, the
 kit waits until it is there: a key line must be non-empty, and the
 passkey's assertion must parse as the page's JSON (`check-assertion`)
@@ -576,13 +609,15 @@ prompt, not an exit.
 # the real signer (decision release-metadata §3). See the hardware-kit chapter.
 #
 #   kit/sign-hardware-vectors.sh <new output dir> [fido2-ed25519] [fido2-ecdsa] [enclave] [passkey]
+#       [batch-fido2-ed25519] [batch-fido2-ecdsa] [batch-enclave] [batch-passkey]
+
 #
 # Environment: X0K_RELEASE_METADATA_BIN (the directory holding the built
 # x0k-release-metadata program and examples/hardware_kit), SSH_KEYGEN
 # (an ssh-keygen with FIDO2 support), SECRETIVE_SOCK (Secretive's agent socket).
 set -euo pipefail
 
-OUT=${1:?usage: sign-hardware-vectors.sh <new output dir> [fido2-ed25519] [fido2-ecdsa] [enclave] [passkey]}
+OUT=${1:?usage: sign-hardware-vectors.sh <new output dir> [fido2-ed25519] [fido2-ecdsa] [enclave] [passkey] [batch-...]}
 shift
 if [ $# -gt 0 ]; then SCHEMES=("$@"); else SCHEMES=(fido2-ed25519 fido2-ecdsa enclave passkey); fi
 CHALLENGE_FIRST=
@@ -633,6 +668,35 @@ sign_vector() {
   "$KIT" finish "$dir" "$claim"
 }
 
+# batch_vector <name> <key.pub> <custody> <touch:yes|no> <signer> <key arg> <claim>: the device
+# signs fleet.json and pilot.json with one batch signature, through one call to sign.
+batch_vector() {
+  local name=$1 public=$2 custody=$3 touch=$4 signer=$5 key=$6 claim=$7
+  local dir="$OUT/$name"
+  if [ "$touch" = yes ]; then
+    "$KIT" prepare "$dir" "$public" "$custody" --touch --batch
+  else
+    "$KIT" prepare "$dir" "$public" "$custody" --batch
+  fi
+  "$CLI" stage "$dir/fleet.body.json" "$dir/fetched/fleet.json"
+  "$CLI" stage "$dir/pilot.body.json" "$dir/fetched/pilot.json"
+  sign_both() {
+    "$CLI" sign "$dir/fetched/fleet.json" "$dir/fetched/pilot.json" --trusted "$dir/trusted/root.json" \
+      --delegator "$dir/fetched/targets.json" --key "$key" --signer "$signer" \
+      --rebuilt "fleet/chariot-1.0.tar=$dir/artifact.tar"
+  }
+  if [ -n "${CHALLENGE_FIRST:-}" ]; then
+    say "Paste the challenge printed below into the passkey page, press 'Sign the challenge', and save the assertion as $key"
+    sign_both || true
+    read -r -p "Press Enter once $key is saved... " _
+    until "$KIT" check-assertion "$key"; do
+      read -r -p "$key is missing, empty or not the page's JSON; save the assertion there and press Enter... " _
+    done
+  fi
+  sign_both
+  "$KIT" finish "$dir" "$claim"
+}
+
 for scheme in "${SCHEMES[@]}"; do
   case "$scheme" in
     fido2-ed25519)
@@ -674,6 +738,50 @@ for scheme in "${SCHEMES[@]}"; do
       CHALLENGE_FIRST=1
       sign_vector hw-passkey-webauthn "$OUT/keys/passkey.pub" passkey no "$KIT" "$OUT/keys/passkey-assertion.json" \
         "A passkey's WebAuthn signature over the SSHSIG blob, made on a phone through Chrome, counts."
+      CHALLENGE_FIRST=
+      kill "$server" 2>/dev/null || true
+      ;;
+    batch-fido2-ed25519)
+      say "FIDO2 ed25519 batch: touch the security key to make a new key, then touch it once to sign two files"
+      "$SSH_KEYGEN" -t ed25519-sk -N "" -C "" -f "$OUT/keys/batch-fido2-ed25519"
+      batch_vector hw-batch-fido2-ed25519 "$OUT/keys/batch-fido2-ed25519.pub" fido2 yes "$SSH_KEYGEN" "$OUT/keys/batch-fido2-ed25519" \
+        "A FIDO2 token's sk-ssh-ed25519 batch signature, made with one touch, counts on both files its statement lists for a signatory whose rule demands the touch."
+      ;;
+    batch-fido2-ecdsa)
+      say "FIDO2 ecdsa batch: touch the security key to make a new key, then touch it once to sign two files"
+      "$SSH_KEYGEN" -t ecdsa-sk -N "" -C "" -f "$OUT/keys/batch-fido2-ecdsa"
+      batch_vector hw-batch-fido2-ecdsa "$OUT/keys/batch-fido2-ecdsa.pub" fido2 yes "$SSH_KEYGEN" "$OUT/keys/batch-fido2-ecdsa" \
+        "A FIDO2 token's sk-ecdsa-sha2-nistp256 batch signature, made with one touch, counts on both files its statement lists for a signatory whose rule demands the touch."
+      ;;
+    batch-enclave)
+      if [ ! -s "$OUT/keys/enclave.pub" ]; then
+        say "Secure Enclave batch: save the public key of a Secretive key made for vectors, never chariot-root, as $OUT/keys/enclave.pub"
+        read -r -p "Press Enter once $OUT/keys/enclave.pub is saved... " _
+        wait_for_file "$OUT/keys/enclave.pub"
+      fi
+      line=$(awk '{print $1" "$2}' "$OUT/keys/enclave.pub")
+      case "$line" in ecdsa-sha2-nistp256\ *) ;; *) echo "refusing: enclave.pub is not an ecdsa-sha2-nistp256 key" >&2; exit 2;; esac
+      if SSH_AUTH_SOCK="$SECRETIVE_SOCK" ssh-add -L 2>/dev/null | grep -i 'chariot-root' | awk '{print $1" "$2}' | grep -qxF "$line"; then
+        echo "refusing: enclave.pub is the chariot-root key" >&2; exit 2
+      fi
+      SSH_AUTH_SOCK="$SECRETIVE_SOCK" ssh-add -L | awk '{print $1" "$2}' | grep -qxF "$line" \
+        || { echo "refusing: Secretive's agent does not hold enclave.pub" >&2; exit 2; }
+      say "Secure Enclave batch: approve the one signature in Secretive's prompt, if it asks"
+      export SSH_AUTH_SOCK="$SECRETIVE_SOCK"
+      batch_vector hw-batch-enclave-ecdsa "$OUT/keys/enclave.pub" secure-enclave no "$SSH_KEYGEN" "$OUT/keys/enclave.pub" \
+        "A Secure Enclave key's ecdsa-sha2-nistp256 batch signature, made through Secretive with one approval, counts on both files its statement lists."
+      unset SSH_AUTH_SOCK
+      ;;
+    batch-passkey)
+      say "Passkey batch: serving the page at http://localhost:8000/passkey.html; open it in Chrome and register a new passkey on your phone"
+      python3 -m http.server 8000 --bind 127.0.0.1 --directory "$KIT_DIR" >/dev/null 2>&1 &
+      server=$!
+      trap 'kill $server 2>/dev/null || true' EXIT
+      read -r -p "Press Enter once the key line is saved as $OUT/keys/batch-passkey.pub... " _
+      wait_for_file "$OUT/keys/batch-passkey.pub"
+      CHALLENGE_FIRST=1
+      batch_vector hw-batch-passkey-webauthn "$OUT/keys/batch-passkey.pub" passkey no "$KIT" "$OUT/keys/batch-passkey-assertion.json" \
+        "A passkey's WebAuthn batch signature over the statement's SSHSIG blob, made on a phone through Chrome, counts on both files its statement lists."
       CHALLENGE_FIRST=
       kill "$server" 2>/dev/null || true
       ;;

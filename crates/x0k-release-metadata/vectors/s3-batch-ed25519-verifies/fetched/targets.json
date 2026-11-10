@@ -1,0 +1,52 @@
+{
+  "signed": {
+    "_type": "targets",
+    "spec_version": "1.0.37",
+    "version": 1,
+    "expires": "2030-01-01T00:00:00Z",
+    "targets": {},
+    "delegations": {
+      "keys": {
+        "ef3527801368f821657dfb20873f9e502c99be5aeea205e8a489605359042e22": {
+          "keytype": "ed25519",
+          "scheme": "ed25519",
+          "keyval": {
+            "public": "5526f742941711b3bc530ba44ff6f6dab0f0ab71af832f41a7fe3b9fdaed9c60"
+          },
+          "x-release-metadata-signatory": "heidi",
+          "x-release-metadata-custody": "software"
+        }
+      },
+      "roles": [
+        {
+          "name": "fleet",
+          "keyids": [
+            "ef3527801368f821657dfb20873f9e502c99be5aeea205e8a489605359042e22"
+          ],
+          "threshold": 1,
+          "terminating": true,
+          "paths": [
+            "fleet/*"
+          ]
+        },
+        {
+          "name": "pilot",
+          "keyids": [
+            "ef3527801368f821657dfb20873f9e502c99be5aeea205e8a489605359042e22"
+          ],
+          "threshold": 1,
+          "terminating": true,
+          "paths": [
+            "pilot/*"
+          ]
+        }
+      ]
+    }
+  },
+  "signatures": [
+    {
+      "keyid": "f6c9e395453b40ec22da6fb07a8b424f38c4363c33fdcff62eda5b7588af66bf",
+      "sig": "0fe4df3f610bd4c5c59b4e3b6ee7ff67623fad08a47d8bc7eb93b4cfe67c1e2ef69ba5adf5322fe52ef3b402e360f7e7312f314ebc27f6168a2743f4797f6e09"
+    }
+  ]
+}

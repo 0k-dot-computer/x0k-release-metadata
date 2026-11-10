@@ -10,6 +10,7 @@
     reason = "a Refusal is what a failed update returns, once per call, and boxing it would make every caller dereference it for no measured gain"
 )]
 
+mod batch;
 mod canonical;
 mod ceremony;
 mod metadata;
@@ -20,8 +21,12 @@ mod signer;
 mod time;
 mod verify;
 
+pub use batch::BATCH_NAMESPACE;
 pub use canonical::{canonical_json, key_id};
-pub use ceremony::{sign, sign_snapshot, sign_timestamp, stage, CeremonyError, Rebuild, Requirement, Standing};
+pub use ceremony::{
+    sign, sign_ceremony, sign_release, sign_snapshot, sign_timestamp, stage, CeremonyError, Rebuild, Release,
+    Requirement, SignedCeremony, SignedRelease, Staged, Standing,
+};
 pub use metadata::{
     Custody, DelegatedRole, Delegations, Key, KeyVal, ListedKey, MetaFile, PresenceFlag, RoleKeys,
     Root, SignatoryRule, Snapshot, TargetEntry, Targets, Timestamp,
@@ -31,5 +36,5 @@ pub use signer::{Signer, SignerError, SignerProgram};
 pub use time::parse_utc;
 pub use verify::{verify, Artifact, Fetched, TrustedState, Verified, VerifiedTarget};
 
-/// The SSHSIG namespace every release-metadata signature is made under.
+/// The SSHSIG namespace a signature over one metadata file is made under.
 pub const NAMESPACE: &str = "release-metadata";

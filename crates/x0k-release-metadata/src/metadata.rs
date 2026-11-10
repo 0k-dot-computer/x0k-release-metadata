@@ -7,10 +7,11 @@ use sha2::{Digest, Sha256};
 
 use crate::canonical::key_id;
 
-/// A metadata body with a `_type` and an expiry.
+/// A metadata body with a `_type`, a version and an expiry.
 pub(crate) trait Typed {
     const TYPE: &'static str;
     fn kind(&self) -> &str;
+    fn version(&self) -> u64;
     fn expires(&self) -> &str;
 }
 
@@ -20,6 +21,9 @@ macro_rules! typed {
             const TYPE: &'static str = $name;
             fn kind(&self) -> &str {
                 &self.kind
+            }
+            fn version(&self) -> u64 {
+                self.version
             }
             fn expires(&self) -> &str {
                 &self.expires

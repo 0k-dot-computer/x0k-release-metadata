@@ -161,6 +161,28 @@ vectors! {
     a_tuf_native_unmet_threshold_is_refused => "tuf-threshold-unmet",
     a_tuf_native_rotation_verifies => "tuf-rotation-verifies",
     a_tuf_native_root_signed_only_by_new_keys_is_refused => "tuf-new-keys-only",
+    a_tuf_ed25519_batch_signature_counts => "s3-batch-ed25519-verifies",
+    an_sshsig_batch_signature_counts => "s3-batch-sshsig-verifies",
+    a_secure_enclave_batch_signature_counts => "s3-batch-software-enclave-verifies",
+    a_fido2_ed25519_batch_signature_counts => "s3-batch-software-fido2-ed25519-verifies",
+    a_fido2_ecdsa_batch_signature_counts => "s3-batch-software-fido2-ecdsa-verifies",
+    a_passkey_batch_signature_counts => "s3-batch-software-passkey-verifies",
+    a_batch_signature_under_the_single_namespace_does_not_count => "s3-batch-under-single-namespace",
+    a_single_signature_under_the_batch_namespace_does_not_count => "s3-single-under-batch-namespace",
+    a_batch_signature_on_an_unlisted_file_does_not_count => "s3-batch-file-not-listed",
+    a_batch_statement_with_another_body_hash_does_not_count => "s3-batch-wrong-body-hash",
+    a_batch_statement_with_another_version_does_not_count => "s3-batch-wrong-version",
+    a_batch_statement_with_another_role_does_not_count => "s3-batch-wrong-role",
+    a_batch_statement_with_another_type_does_not_count => "s3-batch-wrong-type",
+    a_token_batch_signature_without_the_touch_flag_does_not_count => "s4-batch-touch-missing",
+    a_token_batch_signature_with_the_touch_flag_counts => "s4-batch-touch-present",
+    a_release_signed_in_one_batch_verifies => "s6-batch-release-verifies",
+    a_version_only_listing_accepts_another_file_its_role_signed => "s6-version-only-other-file-signed-by-its-role",
+    a_version_only_listing_refuses_another_file_with_the_batch_signature => "s6-version-only-other-file-unsigned",
+    a_real_secure_enclave_batch_signature_counts => "hw-batch-enclave-ecdsa",
+    a_real_fido2_ed25519_batch_signature_counts => "hw-batch-fido2-ed25519",
+    a_real_fido2_ecdsa_batch_signature_counts => "hw-batch-fido2-ecdsa",
+    a_real_passkey_batch_signature_counts => "hw-batch-passkey-webauthn",
 }
 
 #[test]
@@ -207,7 +229,7 @@ fn check_under_root(name: &str, edit: impl FnOnce(&mut serde_json::Value)) -> Re
 
 #[test]
 fn a_real_token_signature_does_not_count_where_the_rule_demands_a_flag_it_lacks() {
-    for name in ["hw-fido2-ed25519", "hw-fido2-ecdsa"] {
+    for name in ["hw-fido2-ed25519", "hw-fido2-ecdsa", "hw-batch-fido2-ed25519", "hw-batch-fido2-ecdsa"] {
         let refusal = check_under_root(name, |root| {
             root["signed"]["x-release-metadata-signatories"]["operator"]["flags"] =
                 serde_json::json!(["user-present", "user-verified"]);
@@ -242,6 +264,39 @@ fn the_public_delegation_refusal_names_the_signatory_who_did_not_sign() {
     let refusal = check("s8-public-delegation-missing-signatory").expect_err("refused");
     let missing: Vec<&str> = refusal.signatories.iter().filter(|v| !v.counted).map(|v| v.signatory.as_str()).collect();
     assert_eq!(missing, ["carol"]);
+}
+
+/// The one fault of `signatory`'s signature in vector `name`'s refusal.
+fn fault_of(name: &str, signatory: &str) -> SignatureFault {
+    let refusal = check(name).expect_err("refused");
+    let verdict = refusal.signatories.iter().find(|v| v.signatory == signatory).expect("signatory named");
+    match verdict.faults.as_slice() {
+        [(_, fault)] => fault.clone(),
+        faults => panic!("{name}: {signatory} has faults {faults:?}"),
+    }
+}
+
+/// Whether a fault is the one a vector expects.
+type FaultCheck<'a> = &'a dyn Fn(&SignatureFault) -> bool;
+
+#[test]
+fn each_batch_refusal_names_why_the_signature_did_not_count() {
+    let unlisted = |fault: &SignatureFault| matches!(fault, SignatureFault::BatchUnlisted { kind, role } if kind == "targets" && role == "fleet");
+    let cases: [(&str, &str, FaultCheck<'_>); 8] = [
+        ("s3-batch-under-single-namespace", "carol", &|f| matches!(f, SignatureFault::Namespace(ns) if ns == "release-metadata")),
+        ("s3-single-under-batch-namespace", "carol", &|f| matches!(f, SignatureFault::Namespace(ns) if ns == "release-metadata-batch")),
+        ("s3-batch-file-not-listed", "carol", &unlisted),
+        ("s3-batch-wrong-body-hash", "carol", &|f| matches!(f, SignatureFault::BatchHash)),
+        ("s3-batch-wrong-version", "carol", &|f| matches!(f, SignatureFault::BatchVersion { listed: 2, offered: 1 })),
+        ("s3-batch-wrong-role", "carol", &unlisted),
+        ("s3-batch-wrong-type", "carol", &unlisted),
+        ("s4-batch-touch-missing", "dave", &|f| matches!(f, SignatureFault::MissingFlag("user-present"))),
+    ];
+    for (name, signatory, expected) in cases {
+        let fault = fault_of(name, signatory);
+        assert!(expected(&fault), "{name}: {fault:?}");
+    }
+    assert!(matches!(fault_of("s6-version-only-other-file-unsigned", "carol"), SignatureFault::BatchHash));
 }
 
 #[test]

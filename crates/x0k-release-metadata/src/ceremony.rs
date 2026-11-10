@@ -2,7 +2,7 @@
 //! The ceremony of decision §5: stage a file, sign it one signatory at a
 //! time, and show who is still missing.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::time::{Duration, SystemTime};
 
@@ -11,14 +11,16 @@ use serde_json::{json, Map, Value};
 use base64ct::{Base64, Encoding};
 use sha2::{Digest, Sha256};
 
-use crate::canonical::{open_envelope, Signature};
+use crate::batch::{self, check_entry};
+use crate::canonical::{canonical_json, open_envelope, Covered, Envelope, Signature};
+use crate::metadata::Typed;
 use crate::quorum::{KeyRing, Quorum};
-use crate::scheme::{check_signature, parse_sshsig, public_identity, PublicIdentity};
+use crate::scheme::{parse_sshsig, public_identity, PublicIdentity};
 use crate::verify::hex_digest;
 use crate::time::format_utc;
 use crate::{
     parse_utc, DelegatedRole, Key, ListedKey, Malformed, Root, SignatoryRule, SignatoryVerdict,
-    SignatureFault, Signer, SignerError, Snapshot, Targets, Timestamp, NAMESPACE,
+    SignatureFault, Signer, SignerError, Snapshot, Targets, Timestamp, BATCH_NAMESPACE, NAMESPACE,
 };
 
 /// Why a ceremony step did not happen.
@@ -47,13 +49,17 @@ pub enum CeremonyError {
     Signer(#[from] SignerError),
     #[error("the signer program did not write an SSH signature")]
     Armor,
-    #[error("the signing key is not one that the staged file's roles list")]
-    KeyNotListed,
+    #[error("the signing key is not one that {role}'s thresholds list")]
+    KeyNotListed { role: String },
+    #[error("there is no staged file to sign")]
+    NothingToSign,
+    #[error("the {kind} file of role {role} is given twice; one signature covers each file once")]
+    RepeatedFile { kind: &'static str, role: String },
     #[error("the new signature does not count: {0}")]
     Signature(#[from] SignatureFault),
     #[error("{path} has no rebuild; rebuild it, or sign as not reproducible")]
     NotRebuilt { path: String },
-    #[error("a rebuild names {path}, which the staged file does not list")]
+    #[error("a rebuild names {path}, which no staged targets file lists")]
     RebuiltUnlisted { path: String },
     #[error("the rebuilt {path} is {rebuilt} bytes; the targets entry lists {listed}")]
     RebuildLength { path: String, listed: u64, rebuilt: u64 },
@@ -283,28 +289,22 @@ impl Requirement {
         found
     }
 
+    /// The role whose file this requirement checks: every threshold is the
+    /// rule of that one role, from one or two files that state it.
+    pub fn role(&self) -> &str {
+        self.thresholds.first().map_or("", |threshold| threshold.role.as_str())
+    }
+
     fn open(&self, staged: &[u8]) -> Result<Opened, CeremonyError> {
         Ok(match self.kind {
-            Kind::Root => {
-                let envelope = open_envelope::<Root>(staged)?;
-                Opened { canonical: envelope.canonical, signatures: envelope.signatures, targets: None }
-            }
+            Kind::Root => Opened::of(open_envelope::<Root>(staged)?, None),
             Kind::Targets => {
                 let envelope = open_envelope::<Targets>(staged)?;
-                Opened {
-                    canonical: envelope.canonical,
-                    signatures: envelope.signatures,
-                    targets: Some(envelope.body),
-                }
+                let targets = envelope.body.clone();
+                Opened::of(envelope, Some(targets))
             }
-            Kind::Snapshot => {
-                let envelope = open_envelope::<Snapshot>(staged)?;
-                Opened { canonical: envelope.canonical, signatures: envelope.signatures, targets: None }
-            }
-            Kind::Timestamp => {
-                let envelope = open_envelope::<Timestamp>(staged)?;
-                Opened { canonical: envelope.canonical, signatures: envelope.signatures, targets: None }
-            }
+            Kind::Snapshot => Opened::of(open_envelope::<Snapshot>(staged)?, None),
+            Kind::Timestamp => Opened::of(open_envelope::<Timestamp>(staged)?, None),
         })
     }
 }
@@ -320,9 +320,22 @@ fn expect_kind(staged: &[u8], expected: Kind) -> Result<(), CeremonyError> {
 
 /// A staged file opened as the verifier opens it.
 struct Opened {
+    kind: &'static str,
+    version: u64,
     canonical: Vec<u8>,
     signatures: Vec<Signature>,
     targets: Option<Targets>,
+}
+
+impl Opened {
+    fn of<T: Typed>(envelope: Envelope<T>, targets: Option<Targets>) -> Self {
+        let (kind, version) = (T::TYPE, envelope.body.version());
+        Self { kind, version, canonical: envelope.canonical, signatures: envelope.signatures, targets }
+    }
+
+    fn covered(&self) -> Covered<'_> {
+        Covered { kind: self.kind, version: self.version, canonical: &self.canonical }
+    }
 }
 
 /// How one threshold of a staged file stands (§5, step 3).
@@ -353,7 +366,7 @@ impl Requirement {
         let opened = self.open(staged)?;
         let mut standings = Vec::new();
         for threshold in &self.thresholds {
-            let tally = threshold.with_quorum(|quorum| quorum.tally(&opened.canonical, &opened.signatures))?;
+            let tally = threshold.with_quorum(|quorum| quorum.tally(&opened.covered(), &opened.signatures))?;
             standings.push(Standing {
                 label: threshold.label.clone(),
                 threshold: threshold.threshold,
@@ -371,37 +384,76 @@ impl Requirement {
     }
 }
 
-/// Signs `staged` through `signer` with the key that `key` names, and
-/// returns the file with the new signature (§5, step 2). A targets file is
-/// signed only when `rebuild` holds for it (§6).
-pub fn sign(
-    staged: &[u8],
-    requirement: &Requirement,
-    rebuild: &Rebuild,
-    signer: &dyn Signer,
-    key: &Path,
-) -> Result<Vec<u8>, CeremonyError> {
-    let opened = requirement.open(staged)?;
-    if let Some(targets) = &opened.targets {
-        rebuild.check(targets)?;
+/// One staged file to sign: the file, the thresholds it must meet, and the
+/// rebuild its targets entries are checked against (§6).
+#[derive(Clone, Copy)]
+pub struct Staged<'a> {
+    pub file: &'a [u8],
+    pub requirement: &'a Requirement,
+    pub rebuild: &'a Rebuild,
+}
+
+/// Signs `files` through `signer` with the key that `key` names, with one
+/// call to the signer, and returns each file with the new signature, in
+/// order (§5, step 2). One file gets a single signature; several get one
+/// batch signature that counts on each (§3). A targets file is signed only
+/// when its rebuild holds (§6).
+pub fn sign(files: &[Staged<'_>], signer: &dyn Signer, key: &Path) -> Result<Vec<Vec<u8>>, CeremonyError> {
+    let opened = files.iter().map(|file| file.requirement.open(file.file)).collect::<Result<Vec<_>, _>>()?;
+    for file in files {
+        let alongside: Vec<&Targets> = files
+            .iter()
+            .zip(&opened)
+            .filter(|(other, _)| std::ptr::eq(other.rebuild, file.rebuild))
+            .filter_map(|(_, opened)| opened.targets.as_ref())
+            .collect();
+        file.rebuild.check(&alongside)?;
     }
-    let armored = signer.sign(key, NAMESPACE, &opened.canonical)?;
+    let (namespace, message, statement) = match opened.as_slice() {
+        [] => return Err(CeremonyError::NothingToSign),
+        [one] => (NAMESPACE, one.canonical.clone(), None),
+        many => {
+            let statement = batch_statement(files, many)?;
+            (BATCH_NAMESPACE, canonical_json(&statement)?, Some(statement))
+        }
+    };
+    let armored = signer.sign(key, namespace, &message)?;
     let blob = unarmor_sshsig(&armored).ok_or(CeremonyError::Armor)?;
     let envelope = parse_sshsig(&blob).ok_or(CeremonyError::Armor)?;
     let identity = PublicIdentity::Decoded(envelope.public_key.to_vec());
     let sig = hex::encode(&blob);
-    let listed = requirement.listed(&identity);
-    if listed.is_empty() {
-        return Err(CeremonyError::KeyNotListed);
+    let mut signed = Vec::new();
+    for (file, opened) in files.iter().zip(&opened) {
+        let role = file.requirement.role();
+        let listed = file.requirement.listed(&identity);
+        if listed.is_empty() {
+            return Err(CeremonyError::KeyNotListed { role: role.to_owned() });
+        }
+        let mut staged = StagedFile::read(file.file)?;
+        for (keyid, key) in listed {
+            let signature = Signature { keyid, sig: sig.clone(), batch: statement.clone() };
+            check_entry(&key, role, &opened.covered(), &signature)?;
+            staged.signatures.retain(|existing| existing.keyid != signature.keyid);
+            staged.signatures.push(signature);
+        }
+        tracing::debug!(role, signatures = staged.signatures.len(), "release_metadata.ceremony.signed");
+        signed.push(staged.write()?);
     }
-    let mut file = StagedFile::read(staged)?;
-    for (keyid, key) in listed {
-        check_signature(&key, &opened.canonical, &sig)?;
-        file.signatures.retain(|signature| signature.keyid != keyid);
-        file.signatures.push(Signature { keyid, sig: sig.clone() });
+    Ok(signed)
+}
+
+/// The batch statement over `opened`, refusing a file given twice.
+fn batch_statement(files: &[Staged<'_>], opened: &[Opened]) -> Result<Value, CeremonyError> {
+    let mut seen = BTreeSet::new();
+    let mut listings = Vec::new();
+    for (file, opened) in files.iter().zip(opened) {
+        let role = file.requirement.role();
+        if !seen.insert((opened.kind, role)) {
+            return Err(CeremonyError::RepeatedFile { kind: opened.kind, role: role.to_owned() });
+        }
+        listings.push(batch::listing(&opened.covered(), role));
     }
-    tracing::debug!(signatures = file.signatures.len(), "release_metadata.ceremony.signed");
-    file.write()
+    Ok(batch::statement(listings))
 }
 
 /// The binary SSHSIG inside `ssh-keygen -Y sign`'s armor.
@@ -425,14 +477,16 @@ pub enum Rebuild {
 }
 
 impl Rebuild {
-    fn check(&self, targets: &Targets) -> Result<(), CeremonyError> {
+    /// Checks the targets files signed with this rebuild.
+    fn check(&self, files: &[&Targets]) -> Result<(), CeremonyError> {
         let Rebuild::Rebuilt(artifacts) = self else {
             return Ok(());
         };
-        if let Some(path) = artifacts.keys().find(|path| !targets.targets.contains_key(*path)) {
+        let listed = |path: &String| files.iter().any(|targets| targets.targets.contains_key(path));
+        if let Some(path) = artifacts.keys().find(|path| !listed(path)) {
             return Err(CeremonyError::RebuiltUnlisted { path: path.clone() });
         }
-        for (path, entry) in &targets.targets {
+        for (path, entry) in files.iter().flat_map(|targets| &targets.targets) {
             let bytes = artifacts.get(path).ok_or_else(|| CeremonyError::NotRebuilt { path: path.clone() })?;
             let rebuilt_length = bytes.len() as u64;
             if rebuilt_length != entry.length {
@@ -475,10 +529,7 @@ pub fn sign_snapshot(
         let version = open_envelope::<Targets>(bytes)?.body.version;
         meta.insert(format!("{role}.json"), meta_entry(version, bytes));
     }
-    let version = match previous {
-        Some(previous) => open_envelope::<Snapshot>(previous)?.body.version.saturating_add(1),
-        None => 1,
-    };
+    let version = next_version::<Snapshot>(previous)?;
     let body = json!({
         "_type": "snapshot", "spec_version": SPEC_VERSION, "version": version,
         "expires": format_utc(expires)?, "meta": meta,
@@ -499,10 +550,7 @@ pub fn sign_timestamp(
     key: &Path,
 ) -> Result<Vec<u8>, CeremonyError> {
     let snapshot_version = open_envelope::<Snapshot>(snapshot)?.body.version;
-    let version = match previous {
-        Some(previous) => open_envelope::<Timestamp>(previous)?.body.version.saturating_add(1),
-        None => 1,
-    };
+    let version = next_version::<Timestamp>(previous)?;
     let body = json!({
         "_type": "timestamp", "spec_version": SPEC_VERSION, "version": version,
         "expires": format_utc(expires)?,
@@ -516,10 +564,133 @@ fn meta_entry(version: u64, bytes: &[u8]) -> Value {
     json!({ "version": version, "length": bytes.len(), "hashes": { "sha256": hex::encode(Sha256::digest(bytes)) } })
 }
 
-fn sign_online(kind: Kind, root: &[u8], body: Value, signer: &dyn Signer, key: &Path) -> Result<Vec<u8>, CeremonyError> {
+/// One listed file by its version only, for a file signed in the same batch
+/// as its lister (§6).
+fn version_entry(version: u64) -> Value {
+    json!({ "version": version })
+}
+
+/// An online role's unsigned file and the threshold it must meet under `root`.
+fn online_file(kind: Kind, root: &Root, body: Value) -> Result<(Vec<u8>, Requirement), CeremonyError> {
     let file = StagedFile { signed: body, signatures: Vec::new() }.write()?;
-    let root = open_envelope::<Root>(root)?.body;
     let role = kind.name();
-    let requirement = Requirement::checked(kind, vec![Threshold::top_level(&root, role, role.to_owned())?])?;
-    sign(&file, &requirement, &Rebuild::Rebuilt(BTreeMap::new()), signer, key)
+    let requirement = Requirement::checked(kind, vec![Threshold::top_level(root, role, role.to_owned())?])?;
+    Ok((file, requirement))
+}
+
+fn sign_online(kind: Kind, root: &[u8], body: Value, signer: &dyn Signer, key: &Path) -> Result<Vec<u8>, CeremonyError> {
+    let (file, requirement) = online_file(kind, &open_envelope::<Root>(root)?.body, body)?;
+    let rebuild = Rebuild::Rebuilt(BTreeMap::new());
+    let staged = Staged { file: &file, requirement: &requirement, rebuild: &rebuild };
+    let mut signed = sign(&[staged], signer, key)?;
+    signed.pop().ok_or(CeremonyError::NothingToSign)
+}
+
+/// The version one more than `previous`'s, or 1 for the first file of a role.
+fn next_version<T: Typed + serde::de::DeserializeOwned>(previous: Option<&[u8]>) -> Result<u64, CeremonyError> {
+    Ok(match previous {
+        Some(previous) => open_envelope::<T>(previous)?.body.version().saturating_add(1),
+        None => 1,
+    })
+}
+
+/// A release to sign in one batch: the staged targets file of `role`, and
+/// what its snapshot and timestamp are built from (§3, §6).
+#[derive(Clone, Copy)]
+pub struct Release<'a> {
+    /// The trusted root, whose roles list the signer's key.
+    pub root: &'a [u8],
+    /// `targets` for the top-level role, or a delegated role's name.
+    pub role: &'a str,
+    /// The staged targets file of `role`.
+    pub staged: &'a [u8],
+    /// The targets file that delegates `role`; `None` for `targets` itself.
+    pub delegator: Option<&'a [u8]>,
+    pub rebuild: &'a Rebuild,
+    /// The other targets files the snapshot lists, by role name.
+    pub listed: &'a BTreeMap<String, Vec<u8>>,
+    pub previous_snapshot: Option<&'a [u8]>,
+    pub previous_timestamp: Option<&'a [u8]>,
+    pub snapshot_expires: SystemTime,
+    pub timestamp_expires: SystemTime,
+}
+
+/// A release's three files, each carrying the one batch signature.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignedRelease {
+    pub targets: Vec<u8>,
+    pub snapshot: Vec<u8>,
+    pub timestamp: Vec<u8>,
+}
+
+/// Signs a release's targets file, snapshot and timestamp with one batch
+/// signature, through `signer` with the key that `key` names (§3, §6).
+pub fn sign_release(release: &Release<'_>, signer: &dyn Signer, key: &Path) -> Result<SignedRelease, CeremonyError> {
+    let requirement = match release.delegator {
+        None => Requirement::targets(release.staged, release.root)?,
+        Some(delegator) => Requirement::delegated_targets(release.staged, release.root, delegator, release.role)?,
+    };
+    let root = open_envelope::<Root>(release.root)?.body;
+    let mut meta = Map::new();
+    for (role, bytes) in release.listed.iter().filter(|(role, _)| role.as_str() != release.role) {
+        meta.insert(format!("{role}.json"), meta_entry(open_envelope::<Targets>(bytes)?.body.version, bytes));
+    }
+    let version = open_envelope::<Targets>(release.staged)?.body.version;
+    meta.insert(format!("{}.json", release.role), version_entry(version));
+    let snapshot_version = next_version::<Snapshot>(release.previous_snapshot)?;
+    let snapshot = json!({
+        "_type": "snapshot", "spec_version": SPEC_VERSION, "version": snapshot_version,
+        "expires": format_utc(release.snapshot_expires)?, "meta": meta,
+    });
+    let timestamp = json!({
+        "_type": "timestamp", "spec_version": SPEC_VERSION,
+        "version": next_version::<Timestamp>(release.previous_timestamp)?,
+        "expires": format_utc(release.timestamp_expires)?,
+        "meta": { "snapshot.json": version_entry(snapshot_version) },
+    });
+    let (snapshot, snapshot_requirement) = online_file(Kind::Snapshot, &root, snapshot)?;
+    let (timestamp, timestamp_requirement) = online_file(Kind::Timestamp, &root, timestamp)?;
+    let none = Rebuild::Rebuilt(BTreeMap::new());
+    let files = [
+        Staged { file: release.staged, requirement: &requirement, rebuild: release.rebuild },
+        Staged { file: &snapshot, requirement: &snapshot_requirement, rebuild: &none },
+        Staged { file: &timestamp, requirement: &timestamp_requirement, rebuild: &none },
+    ];
+    let mut signed = sign(&files, signer, key)?.into_iter();
+    let mut next = || signed.next().ok_or(CeremonyError::NothingToSign);
+    Ok(SignedRelease { targets: next()?, snapshot: next()?, timestamp: next()? })
+}
+
+/// A root and the top-level targets file under it, each carrying the one
+/// batch signature.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignedCeremony {
+    pub root: Vec<u8>,
+    pub targets: Vec<u8>,
+}
+
+/// Signs a staged root and the staged top-level targets file under it with
+/// one batch signature (§3, §5). `trusted_root` is the root version before
+/// it, or `None` for a first root.
+pub fn sign_ceremony(
+    root: &[u8],
+    trusted_root: Option<&[u8]>,
+    targets: &[u8],
+    rebuild: &Rebuild,
+    signer: &dyn Signer,
+    key: &Path,
+) -> Result<SignedCeremony, CeremonyError> {
+    let root_requirement = match trusted_root {
+        None => Requirement::first_root(root)?,
+        Some(trusted) => Requirement::next_root(root, trusted)?,
+    };
+    let targets_requirement = Requirement::targets(targets, root)?;
+    let none = Rebuild::Rebuilt(BTreeMap::new());
+    let files = [
+        Staged { file: root, requirement: &root_requirement, rebuild: &none },
+        Staged { file: targets, requirement: &targets_requirement, rebuild },
+    ];
+    let mut signed = sign(&files, signer, key)?.into_iter();
+    let mut next = || signed.next().ok_or(CeremonyError::NothingToSign);
+    Ok(SignedCeremony { root: next()?, targets: next()? })
 }

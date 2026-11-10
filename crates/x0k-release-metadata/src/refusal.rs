@@ -94,6 +94,7 @@ impl Rule {
 
 /// Why one signature did not count.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum SignatureFault {
     #[error("unknown scheme {0}")]
     UnknownScheme(String),
@@ -109,6 +110,14 @@ pub enum SignatureFault {
     MissingFlag(&'static str),
     #[error("the WebAuthn client data does not carry this message as its challenge")]
     ClientData,
+    #[error("the batch statement is not a release-metadata-batch statement this verifier reads")]
+    BatchStatement,
+    #[error("the batch statement does not list the {kind} file of role {role}")]
+    BatchUnlisted { kind: String, role: String },
+    #[error("the batch statement lists version {listed}; this file is version {offered}")]
+    BatchVersion { listed: u64, offered: u64 },
+    #[error("the batch statement lists another hash of this file's signed body")]
+    BatchHash,
 }
 
 /// A metadata file that breaks the format.

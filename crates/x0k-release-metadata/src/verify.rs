@@ -107,7 +107,7 @@ fn update_root<'f>(
         for keys_of in [&current, &next.body] {
             let version = keys_of.version;
             role_quorum(keys_of, "root", |quorum| {
-                quorum.require(&next.canonical, &next.signatures, |threshold, counted| {
+                quorum.require(&next.covered(), &next.signatures, |threshold, counted| {
                     Rule::RootThreshold { keys_of: version, threshold, counted }
                 })
             })?;
@@ -155,7 +155,7 @@ fn update_timestamp(
 ) -> Result<Timestamp, Refusal> {
     let role = "timestamp";
     let new: Envelope<Timestamp> = open_envelope(&fetched.timestamp).map_err(|e| Refusal::new(role, e))?;
-    role_quorum(root, role, |q| q.require(&new.canonical, &new.signatures, threshold))?;
+    role_quorum(root, role, |q| q.require(&new.covered(), &new.signatures, threshold))?;
     if let Some(bytes) = trusted {
         let old: Envelope<Timestamp> = open_envelope(&bytes).map_err(|e| Refusal::new(role, e))?;
         check_not_lower(role, old.body.version, new.body.version)?;
@@ -190,7 +190,7 @@ fn update_snapshot(
     let listed = snapshot_listing(timestamp)?;
     check_listing(role, "timestamp", listed, &fetched.snapshot)?;
     let new: Envelope<Snapshot> = open_envelope(&fetched.snapshot).map_err(|e| Refusal::new(role, e))?;
-    role_quorum(root, role, |q| q.require(&new.canonical, &new.signatures, threshold))?;
+    role_quorum(root, role, |q| q.require(&new.covered(), &new.signatures, threshold))?;
     check_listed_version(role, "timestamp", listed, new.body.version)?;
     if let Some(bytes) = trusted {
         let old: Envelope<Snapshot> = open_envelope(&bytes).map_err(|e| Refusal::new(role, e))?;
@@ -225,9 +225,9 @@ fn load_targets(
         .ok_or_else(|| Refusal::new(role, Rule::Missing))?;
     check_listing(role, "snapshot", listed, bytes)?;
     let envelope: Envelope<Targets> = open_envelope(bytes).map_err(|e| Refusal::new(role, e))?;
-    quorum.require(&envelope.canonical, &envelope.signatures, threshold)?;
+    quorum.require(&envelope.covered(), &envelope.signatures, threshold)?;
     if public && envelope.body.delegates() {
-        quorum.require_every(&envelope.canonical, &envelope.signatures)?;
+        quorum.require_every(&envelope.covered(), &envelope.signatures)?;
     }
     check_listed_version(role, "snapshot", listed, envelope.body.version)?;
     check_expiry(role, &envelope.body, now)?;

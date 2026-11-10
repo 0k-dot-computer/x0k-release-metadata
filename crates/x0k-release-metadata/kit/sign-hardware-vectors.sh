@@ -4,13 +4,15 @@
 # the real signer (decision release-metadata §3). See the hardware-kit chapter.
 #
 #   kit/sign-hardware-vectors.sh <new output dir> [fido2-ed25519] [fido2-ecdsa] [enclave] [passkey]
+#       [batch-fido2-ed25519] [batch-fido2-ecdsa] [batch-enclave] [batch-passkey]
+
 #
 # Environment: X0K_RELEASE_METADATA_BIN (the directory holding the built
 # x0k-release-metadata program and examples/hardware_kit), SSH_KEYGEN
 # (an ssh-keygen with FIDO2 support), SECRETIVE_SOCK (Secretive's agent socket).
 set -euo pipefail
 
-OUT=${1:?usage: sign-hardware-vectors.sh <new output dir> [fido2-ed25519] [fido2-ecdsa] [enclave] [passkey]}
+OUT=${1:?usage: sign-hardware-vectors.sh <new output dir> [fido2-ed25519] [fido2-ecdsa] [enclave] [passkey] [batch-...]}
 shift
 if [ $# -gt 0 ]; then SCHEMES=("$@"); else SCHEMES=(fido2-ed25519 fido2-ecdsa enclave passkey); fi
 CHALLENGE_FIRST=
@@ -61,6 +63,35 @@ sign_vector() {
   "$KIT" finish "$dir" "$claim"
 }
 
+# batch_vector <name> <key.pub> <custody> <touch:yes|no> <signer> <key arg> <claim>: the device
+# signs fleet.json and pilot.json with one batch signature, through one call to sign.
+batch_vector() {
+  local name=$1 public=$2 custody=$3 touch=$4 signer=$5 key=$6 claim=$7
+  local dir="$OUT/$name"
+  if [ "$touch" = yes ]; then
+    "$KIT" prepare "$dir" "$public" "$custody" --touch --batch
+  else
+    "$KIT" prepare "$dir" "$public" "$custody" --batch
+  fi
+  "$CLI" stage "$dir/fleet.body.json" "$dir/fetched/fleet.json"
+  "$CLI" stage "$dir/pilot.body.json" "$dir/fetched/pilot.json"
+  sign_both() {
+    "$CLI" sign "$dir/fetched/fleet.json" "$dir/fetched/pilot.json" --trusted "$dir/trusted/root.json" \
+      --delegator "$dir/fetched/targets.json" --key "$key" --signer "$signer" \
+      --rebuilt "fleet/chariot-1.0.tar=$dir/artifact.tar"
+  }
+  if [ -n "${CHALLENGE_FIRST:-}" ]; then
+    say "Paste the challenge printed below into the passkey page, press 'Sign the challenge', and save the assertion as $key"
+    sign_both || true
+    read -r -p "Press Enter once $key is saved... " _
+    until "$KIT" check-assertion "$key"; do
+      read -r -p "$key is missing, empty or not the page's JSON; save the assertion there and press Enter... " _
+    done
+  fi
+  sign_both
+  "$KIT" finish "$dir" "$claim"
+}
+
 for scheme in "${SCHEMES[@]}"; do
   case "$scheme" in
     fido2-ed25519)
@@ -102,6 +133,50 @@ for scheme in "${SCHEMES[@]}"; do
       CHALLENGE_FIRST=1
       sign_vector hw-passkey-webauthn "$OUT/keys/passkey.pub" passkey no "$KIT" "$OUT/keys/passkey-assertion.json" \
         "A passkey's WebAuthn signature over the SSHSIG blob, made on a phone through Chrome, counts."
+      CHALLENGE_FIRST=
+      kill "$server" 2>/dev/null || true
+      ;;
+    batch-fido2-ed25519)
+      say "FIDO2 ed25519 batch: touch the security key to make a new key, then touch it once to sign two files"
+      "$SSH_KEYGEN" -t ed25519-sk -N "" -C "" -f "$OUT/keys/batch-fido2-ed25519"
+      batch_vector hw-batch-fido2-ed25519 "$OUT/keys/batch-fido2-ed25519.pub" fido2 yes "$SSH_KEYGEN" "$OUT/keys/batch-fido2-ed25519" \
+        "A FIDO2 token's sk-ssh-ed25519 batch signature, made with one touch, counts on both files its statement lists for a signatory whose rule demands the touch."
+      ;;
+    batch-fido2-ecdsa)
+      say "FIDO2 ecdsa batch: touch the security key to make a new key, then touch it once to sign two files"
+      "$SSH_KEYGEN" -t ecdsa-sk -N "" -C "" -f "$OUT/keys/batch-fido2-ecdsa"
+      batch_vector hw-batch-fido2-ecdsa "$OUT/keys/batch-fido2-ecdsa.pub" fido2 yes "$SSH_KEYGEN" "$OUT/keys/batch-fido2-ecdsa" \
+        "A FIDO2 token's sk-ecdsa-sha2-nistp256 batch signature, made with one touch, counts on both files its statement lists for a signatory whose rule demands the touch."
+      ;;
+    batch-enclave)
+      if [ ! -s "$OUT/keys/enclave.pub" ]; then
+        say "Secure Enclave batch: save the public key of a Secretive key made for vectors, never chariot-root, as $OUT/keys/enclave.pub"
+        read -r -p "Press Enter once $OUT/keys/enclave.pub is saved... " _
+        wait_for_file "$OUT/keys/enclave.pub"
+      fi
+      line=$(awk '{print $1" "$2}' "$OUT/keys/enclave.pub")
+      case "$line" in ecdsa-sha2-nistp256\ *) ;; *) echo "refusing: enclave.pub is not an ecdsa-sha2-nistp256 key" >&2; exit 2;; esac
+      if SSH_AUTH_SOCK="$SECRETIVE_SOCK" ssh-add -L 2>/dev/null | grep -i 'chariot-root' | awk '{print $1" "$2}' | grep -qxF "$line"; then
+        echo "refusing: enclave.pub is the chariot-root key" >&2; exit 2
+      fi
+      SSH_AUTH_SOCK="$SECRETIVE_SOCK" ssh-add -L | awk '{print $1" "$2}' | grep -qxF "$line" \
+        || { echo "refusing: Secretive's agent does not hold enclave.pub" >&2; exit 2; }
+      say "Secure Enclave batch: approve the one signature in Secretive's prompt, if it asks"
+      export SSH_AUTH_SOCK="$SECRETIVE_SOCK"
+      batch_vector hw-batch-enclave-ecdsa "$OUT/keys/enclave.pub" secure-enclave no "$SSH_KEYGEN" "$OUT/keys/enclave.pub" \
+        "A Secure Enclave key's ecdsa-sha2-nistp256 batch signature, made through Secretive with one approval, counts on both files its statement lists."
+      unset SSH_AUTH_SOCK
+      ;;
+    batch-passkey)
+      say "Passkey batch: serving the page at http://localhost:8000/passkey.html; open it in Chrome and register a new passkey on your phone"
+      python3 -m http.server 8000 --bind 127.0.0.1 --directory "$KIT_DIR" >/dev/null 2>&1 &
+      server=$!
+      trap 'kill $server 2>/dev/null || true' EXIT
+      read -r -p "Press Enter once the key line is saved as $OUT/keys/batch-passkey.pub... " _
+      wait_for_file "$OUT/keys/batch-passkey.pub"
+      CHALLENGE_FIRST=1
+      batch_vector hw-batch-passkey-webauthn "$OUT/keys/batch-passkey.pub" passkey no "$KIT" "$OUT/keys/batch-passkey-assertion.json" \
+        "A passkey's WebAuthn batch signature over the statement's SSHSIG blob, made on a phone through Chrome, counts on both files its statement lists."
       CHALLENGE_FIRST=
       kill "$server" 2>/dev/null || true
       ;;

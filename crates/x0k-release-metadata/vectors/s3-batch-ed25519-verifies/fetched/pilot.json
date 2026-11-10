@@ -1,0 +1,36 @@
+{
+  "signed": {
+    "_type": "targets",
+    "spec_version": "1.0.37",
+    "version": 1,
+    "expires": "2030-01-01T00:00:00Z",
+    "targets": {}
+  },
+  "signatures": [
+    {
+      "keyid": "ef3527801368f821657dfb20873f9e502c99be5aeea205e8a489605359042e22",
+      "sig": "c7a3d6528f1646caf7ae217c4e32dd7c2e4765da4b07da173216f5cfe59ee4143754bc0f731833ea7747985684e3b1447cdffdba20974b5b82abe0cef888ed00",
+      "x-release-metadata-batch": {
+        "_type": "release-metadata-batch",
+        "files": [
+          {
+            "_type": "targets",
+            "role": "fleet",
+            "version": 1,
+            "hashes": {
+              "sha256": "13e849d35a8722ab2a1d8955cef765e325a48d83fbf3528a0c038d6d28e9d9c5"
+            }
+          },
+          {
+            "_type": "targets",
+            "role": "pilot",
+            "version": 1,
+            "hashes": {
+              "sha256": "6fc6799d6a1c4107d5a161331df5e63c80a35ae58abc6790c59855581f9dc0cc"
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

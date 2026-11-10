@@ -1,0 +1,62 @@
+{
+  "signed": {
+    "_type": "snapshot",
+    "spec_version": "1.0.37",
+    "version": 1,
+    "expires": "2030-01-01T00:00:00Z",
+    "meta": {
+      "targets.json": {
+        "version": 1,
+        "length": 3061,
+        "hashes": {
+          "sha256": "26df067560821a8f96881b0a9e03c7370748351d0238e056401ca23c2cbf11f6"
+        }
+      },
+      "fleet.json": {
+        "version": 1
+      },
+      "pilot.json": {
+        "version": 1,
+        "length": 413,
+        "hashes": {
+          "sha256": "58223f5758fcf10c1b480f00a6366d896970d5ebc9f4e5bc61a306ded5dc1cb6"
+        }
+      }
+    }
+  },
+  "signatures": [
+    {
+      "keyid": "b3d7fb720a30715d527368d548cb31ef4ecd24db31d8749370f335cd3fd1254e",
+      "sig": "53534853494700000001000000330000000b7373682d656432353531390000002031debe55d37c722768b137131caa6087080b2e0b60b94bd785d14575cfa498bc0000001672656c656173652d6d657461646174612d62617463680000000000000006736861353132000000530000000b7373682d6564323535313900000040781dfbd2f0cdd49b6fd9284c0073682dbb90ffda3c726ca4f850ef24497b5777e7edb154baf40ce70afbc23da8712c2ab4d8c198425fe8bdaaf8dc022ea48903",
+      "x-release-metadata-batch": {
+        "_type": "release-metadata-batch",
+        "files": [
+          {
+            "_type": "targets",
+            "role": "fleet",
+            "version": 1,
+            "hashes": {
+              "sha256": "13e849d35a8722ab2a1d8955cef765e325a48d83fbf3528a0c038d6d28e9d9c5"
+            }
+          },
+          {
+            "_type": "snapshot",
+            "role": "snapshot",
+            "version": 1,
+            "hashes": {
+              "sha256": "c762c34b8811f8e2e874b0c876791bd874c882295cae3e3fd804db500ea7a39b"
+            }
+          },
+          {
+            "_type": "timestamp",
+            "role": "timestamp",
+            "version": 1,
+            "hashes": {
+              "sha256": "45720fd4dda64ec765ffea70cc1be12d6705b27f7e288bb5363c4996281f9323"
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

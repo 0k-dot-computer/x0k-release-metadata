@@ -46,9 +46,12 @@ ones the TUF specification names, plus one for audiences (Context).
   cannot make a machine accept an artifact that a maintainer did not sign
   (§6).
 - **A signature made for something else.** Every signature is made under
-  the fixed namespace `release-metadata`, so a git commit signature or a
+  a fixed namespace, `release-metadata` for one file and
+  `release-metadata-batch` for several, so a git commit signature or a
   file signature that a maintainer's key made does not count as a release
-  signature (§3).
+  signature (§3). A signature over several files counts on a file only
+  when its statement names that file's role, version and body hash, so it
+  cannot be moved to another file or another version (§3).
 - **A forged change of signers.** A new root counts only when enough
   signers of the root a machine already trusts sign it, and enough signers
   of the new root sign it too. A machine that missed several versions checks

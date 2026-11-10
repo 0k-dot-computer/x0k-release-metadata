@@ -1,0 +1,36 @@
+{
+  "signed": {
+    "_type": "targets",
+    "spec_version": "1.0.37",
+    "version": 1,
+    "expires": "2030-01-01T00:00:00Z",
+    "targets": {}
+  },
+  "signatures": [
+    {
+      "keyid": "9943dd090f7e29fb69be1b878e9d64cab3a40daaae0929221eea9f609b79ba39",
+      "sig": "535348534947000000010000004a0000001a736b2d7373682d65643235353139406f70656e7373682e636f6d00000020fdfbf5f3e3697d51245c85e55a5458f699d957ff3dcf05694e8c00a5640c40a4000000047373683a0000001672656c656173652d6d657461646174612d62617463680000000000000006736861353132000000670000001a736b2d7373682d65643235353139406f70656e7373682e636f6d0000004005fc118a70fc4cc591e138e17eb09407878bb26777686f2f4945daec6fc0adecde214dc89f4c0c85dc2d70101195dc03bd90aa80fc5ef9c8670aec23a6669604010002c651",
+      "x-release-metadata-batch": {
+        "_type": "release-metadata-batch",
+        "files": [
+          {
+            "_type": "targets",
+            "role": "fleet",
+            "version": 1,
+            "hashes": {
+              "sha256": "13e849d35a8722ab2a1d8955cef765e325a48d83fbf3528a0c038d6d28e9d9c5"
+            }
+          },
+          {
+            "_type": "targets",
+            "role": "pilot",
+            "version": 1,
+            "hashes": {
+              "sha256": "6fc6799d6a1c4107d5a161331df5e63c80a35ae58abc6790c59855581f9dc0cc"
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

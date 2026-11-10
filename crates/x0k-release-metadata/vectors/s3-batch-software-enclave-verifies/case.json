@@ -1,0 +1,17 @@
+{
+  "decision": "§3",
+  "claim": "A P-256 SSHSIG batch signature, the kind a Secure Enclave key makes, counts on each file its statement lists (software-made).",
+  "now": "2026-11-05T00:00:00Z",
+  "target": {
+    "path": "fleet/chariot-1.0.tar",
+    "length": 12,
+    "hashes": {
+      "sha256": "529562fc496d2dee4d817e3c494918eaff77a1222f23f152bb3bb65141520451"
+    }
+  },
+  "expect": {
+    "verified": {
+      "role": "fleet"
+    }
+  }
+}

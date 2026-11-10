@@ -5,16 +5,22 @@ use p256::ecdsa::signature::Verifier as _;
 use p256::ecdsa::{Signature as P256Signature, VerifyingKey as P256VerifyingKey};
 use sha2::{Digest, Sha256, Sha512};
 
-use crate::{Key, SignatureFault, NAMESPACE};
+use crate::{Key, SignatureFault};
 
 /// Checks one signature by `key` over `message`, in the key's scheme, and
-/// returns the flags an `sk` signature carries.
-pub(crate) fn check_signature(key: &Key, message: &[u8], sig_hex: &str) -> Result<Option<u8>, SignatureFault> {
+/// returns the flags an `sk` signature carries. An SSHSIG signature must be
+/// made under `namespace`; TUF's `ed25519` has no namespace.
+pub(crate) fn check_signature(
+    key: &Key,
+    namespace: &str,
+    message: &[u8],
+    sig_hex: &str,
+) -> Result<Option<u8>, SignatureFault> {
     match key.scheme.as_str() {
         "ed25519" if key.keytype == "ed25519" => check_ed25519(key, message, sig_hex).map(|()| None),
         "ed25519" => Err(SignatureFault::Key),
         scheme => match SshKeyType::of_scheme(scheme) {
-            Some(keytype) => check_sshsig(key, keytype, message, sig_hex),
+            Some(keytype) => check_sshsig(key, keytype, namespace, message, sig_hex),
             None => Err(SignatureFault::UnknownScheme(scheme.to_owned())),
         },
     }
@@ -229,11 +235,17 @@ fn sshsig_signed_data(namespace: &[u8], hash_algorithm: &[u8], message: &[u8]) -
     Some(signed)
 }
 
-fn check_sshsig(key: &Key, keytype: SshKeyType, message: &[u8], sig_hex: &str) -> Result<Option<u8>, SignatureFault> {
+fn check_sshsig(
+    key: &Key,
+    keytype: SshKeyType,
+    namespace: &str,
+    message: &[u8],
+    sig_hex: &str,
+) -> Result<Option<u8>, SignatureFault> {
     let public = ssh_public(key, keytype)?;
     let blob = hex::decode(sig_hex).map_err(|_| SignatureFault::Encoding)?;
     let envelope = parse_sshsig(&blob).ok_or(SignatureFault::Encoding)?;
-    if envelope.namespace != NAMESPACE.as_bytes() {
+    if envelope.namespace != namespace.as_bytes() {
         return Err(SignatureFault::Namespace(String::from_utf8_lossy(envelope.namespace).into_owned()));
     }
     if envelope.public_key != public.wire.as_slice() {

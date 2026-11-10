@@ -3,7 +3,7 @@
 ```turtle folio:document
 implementation:release-metadata\/release-metadata a x0k:Implementation ;
     x0k:status "draft" ;
-    x0k:summary "The TUF metadata types with signatory, custody and presence-flag fields, TUF's ed25519 scheme and the four SSHSIG schemes (an SSH key, a Secure Enclave key, a FIDO2 token, a passkey through WebAuthn), and a pure verifier that walks TUF's client workflow and counts signatories, not keys." ;
+    x0k:summary "The TUF metadata types with signatory, custody and presence-flag fields, TUF's ed25519 scheme and the four SSHSIG schemes (an SSH key, a Secure Enclave key, a FIDO2 token, a passkey through WebAuthn), batch signatures that count on every file their statement lists, and a pure verifier that walks TUF's client workflow and counts signatories, not keys." ;
     x0k:concerns "trust", "delivery", "signing", "keys", "publication" ;
     x0k:cites architecture:service-authorization,
         publication:x0k-release-metadata,
@@ -26,11 +26,13 @@ the new trusted state, or a `Refusal` that names the role, the rule and the
 signatories.
 
 The record layout and the client workflow are TUF's (specification 1.0.37),
-as `x0k:architecture/release-metadata` §1 decides. The crate adds two things
-to TUF. A threshold counts **signatories**, the people who may sign, and not
-keys (§4). A signature may also be an **SSHSIG** envelope, so keys that an
-SSH agent holds can sign (§3). A repository that uses neither addition is
-plain TUF, and this verifier reads it the way a TUF client does.
+as `x0k:architecture/release-metadata` §1 decides. The crate adds three
+things to TUF. A threshold counts **signatories**, the people who may sign,
+and not keys (§4). A signature may also be an **SSHSIG** envelope, so keys
+that an SSH agent holds can sign (§3). And one **batch signature** can count
+on several files, so one touch of a security key signs a whole release
+(§3). A repository that uses none of these is plain TUF, and this verifier
+reads it the way a TUF client does.
 
 The carried example is chariot's root. Alice and Bob are its maintainers.
 Alice holds two keys, a laptop key and a FIDO2 token; Bob holds one. The
@@ -94,6 +96,7 @@ no x0k crate and on no git source, so chariot takes it from crates.io.
     reason = "a Refusal is what a failed update returns, once per call, and boxing it would make every caller dereference it for no measured gain"
 )]
 
+mod batch;
 mod canonical;
 mod ceremony;
 mod metadata;
@@ -104,8 +107,12 @@ mod signer;
 mod time;
 mod verify;
 
+pub use batch::BATCH_NAMESPACE;
 pub use canonical::{canonical_json, key_id};
-pub use ceremony::{sign, sign_snapshot, sign_timestamp, stage, CeremonyError, Rebuild, Requirement, Standing};
+pub use ceremony::{
+    sign, sign_ceremony, sign_release, sign_snapshot, sign_timestamp, stage, CeremonyError, Rebuild, Release,
+    Requirement, SignedCeremony, SignedRelease, Staged, Standing,
+};
 pub use metadata::{
     Custody, DelegatedRole, Delegations, Key, KeyVal, ListedKey, MetaFile, PresenceFlag, RoleKeys,
     Root, SignatoryRule, Snapshot, TargetEntry, Targets, Timestamp,
@@ -115,7 +122,7 @@ pub use signer::{Signer, SignerError, SignerProgram};
 pub use time::parse_utc;
 pub use verify::{verify, Artifact, Fetched, TrustedState, Verified, VerifiedTarget};
 
-/// The SSHSIG namespace every release-metadata signature is made under.
+/// The SSHSIG namespace a signature over one metadata file is made under.
 pub const NAMESPACE: &str = "release-metadata";
 ```
 
@@ -239,16 +246,21 @@ impl Rule {
 }
 ```
 
-§3 names the three reasons a signature does not count: another namespace,
-an unknown scheme, or a key the role does not list. The last is not a fault
-of the signature, so it goes in `Refusal::unlisted_keys`. The others, and a
-signature that does not verify, are faults.
+§3 names the reasons a signature does not count: another namespace, an
+unknown scheme, a key the role does not list, or a batch statement that
+does not list this file. A key the role does not list is not a fault of
+the signature, so it goes in `Refusal::unlisted_keys`. The others, and a
+signature that does not verify, are faults. A batch statement fails in one
+of four ways, each named: it is not a statement this verifier reads, it
+does not list this file's type and role, it lists another version, or it
+lists another hash of the body ("Batch signatures", below).
 
 <a name="chunk-signature-fault"></a><sub>[`src/lib.rs`](../../crates/x0k-release-metadata/src/lib.rs) · `#signature-fault`</sub>
 
 ```rust {#signature-fault}
 /// Why one signature did not count.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum SignatureFault {
     #[error("unknown scheme {0}")]
     UnknownScheme(String),
@@ -264,6 +276,14 @@ pub enum SignatureFault {
     MissingFlag(&'static str),
     #[error("the WebAuthn client data does not carry this message as its challenge")]
     ClientData,
+    #[error("the batch statement is not a release-metadata-batch statement this verifier reads")]
+    BatchStatement,
+    #[error("the batch statement does not list the {kind} file of role {role}")]
+    BatchUnlisted { kind: String, role: String },
+    #[error("the batch statement lists version {listed}; this file is version {offered}")]
+    BatchVersion { listed: u64, offered: u64 },
+    #[error("the batch statement lists another hash of this file's signed body")]
+    BatchHash,
 }
 ```
 
@@ -353,7 +373,14 @@ pub fn key_id(key: &Value) -> Result<String, Malformed> {
 A metadata file is an envelope of the body and its signatures. Opening one
 yields the typed body, the canonical bytes its signatures cover, and the
 signatures, after checking that `_type` names the role kind the caller
-expects.
+expects. A signature entry is TUF's `keyid` and `sig`. A batch signature
+also carries, in `x-release-metadata-batch`, the statement it signs; it is
+kept as the JSON value read, so its canonical bytes are what the signer
+saw ("Batch signatures", below).
+
+What a signature must cover is the file's kind, its version and the
+canonical bytes of its body. A single signature covers the bytes; a batch
+statement names all three.
 
 <a name="chunk-envelope"></a><sub>[`src/lib.rs`](../../crates/x0k-release-metadata/src/lib.rs) · `#envelope`</sub>
 
@@ -363,6 +390,9 @@ expects.
 pub(crate) struct Signature {
     pub keyid: String,
     pub sig: String,
+    /// The statement a batch signature signs; absent for a single signature.
+    #[serde(default, rename = "x-release-metadata-batch", skip_serializing_if = "Option::is_none")]
+    pub batch: Option<Value>,
 }
 
 /// A metadata file as read off the wire.
@@ -370,6 +400,20 @@ pub(crate) struct Envelope<T> {
     pub body: T,
     pub canonical: Vec<u8>,
     pub signatures: Vec<Signature>,
+}
+
+/// What one file's signatures must cover: its kind, its version and its body.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Covered<'a> {
+    pub kind: &'a str,
+    pub version: u64,
+    pub canonical: &'a [u8],
+}
+
+impl<T: Typed> Envelope<T> {
+    pub(crate) fn covered(&self) -> Covered<'_> {
+        Covered { kind: T::TYPE, version: self.body.version(), canonical: &self.canonical }
+    }
 }
 
 #[derive(Deserialize)]
@@ -413,10 +457,11 @@ use sha2::{Digest, Sha256};
 
 use crate::canonical::key_id;
 
-/// A metadata body with a `_type` and an expiry.
+/// A metadata body with a `_type`, a version and an expiry.
 pub(crate) trait Typed {
     const TYPE: &'static str;
     fn kind(&self) -> &str;
+    fn version(&self) -> u64;
     fn expires(&self) -> &str;
 }
 
@@ -426,6 +471,9 @@ macro_rules! typed {
             const TYPE: &'static str = $name;
             fn kind(&self) -> &str {
                 &self.kind
+            }
+            fn version(&self) -> u64 {
+                self.version
             }
             fn expires(&self) -> &str {
                 &self.expires
@@ -699,7 +747,10 @@ fn segment_matches(pattern: &[u8], segment: &[u8]) -> bool {
 ```
 
 The snapshot lists the version of every targets file; the timestamp lists
-the snapshot. Each listing may also give a length and hashes.
+the snapshot. Each listing may also give a length and hashes, which TUF
+makes optional. A listing whose file was signed in the same batch as the
+lister gives the version only, since the hashes of a whole file cover its
+signatures and so cannot exist before the batch is signed (decision §6).
 
 <a name="chunk-snapshot-timestamp"></a><sub>[`src/lib.rs`](../../crates/x0k-release-metadata/src/lib.rs) · `#snapshot-timestamp`</sub>
 
@@ -853,7 +904,8 @@ TUF's `ed25519` key holds the raw 32-byte public key in hex, and its
 signature is a raw Ed25519 signature over the canonical bytes, in hex.
 
 Every other scheme is an SSHSIG envelope (OpenSSH `PROTOCOL.sshsig`) over
-the canonical bytes, under the namespace `release-metadata`. The key
+the canonical bytes, under the namespace `release-metadata`, or over a
+batch statement under `release-metadata-batch` (below). The key
 object holds the public key as `ssh-keygen` prints it, with no comment
 (`sk-ssh-ed25519@openssh.com AAAAGnNr…`), and its `keytype` is that line's
 key type. The `sig` field holds the envelope's binary encoding in
@@ -874,16 +926,22 @@ use p256::ecdsa::signature::Verifier as _;
 use p256::ecdsa::{Signature as P256Signature, VerifyingKey as P256VerifyingKey};
 use sha2::{Digest, Sha256, Sha512};
 
-use crate::{Key, SignatureFault, NAMESPACE};
+use crate::{Key, SignatureFault};
 
 /// Checks one signature by `key` over `message`, in the key's scheme, and
-/// returns the flags an `sk` signature carries.
-pub(crate) fn check_signature(key: &Key, message: &[u8], sig_hex: &str) -> Result<Option<u8>, SignatureFault> {
+/// returns the flags an `sk` signature carries. An SSHSIG signature must be
+/// made under `namespace`; TUF's `ed25519` has no namespace.
+pub(crate) fn check_signature(
+    key: &Key,
+    namespace: &str,
+    message: &[u8],
+    sig_hex: &str,
+) -> Result<Option<u8>, SignatureFault> {
     match key.scheme.as_str() {
         "ed25519" if key.keytype == "ed25519" => check_ed25519(key, message, sig_hex).map(|()| None),
         "ed25519" => Err(SignatureFault::Key),
         scheme => match SshKeyType::of_scheme(scheme) {
-            Some(keytype) => check_sshsig(key, keytype, message, sig_hex),
+            Some(keytype) => check_sshsig(key, keytype, namespace, message, sig_hex),
             None => Err(SignatureFault::UnknownScheme(scheme.to_owned())),
         },
     }
@@ -1152,11 +1210,17 @@ fn sshsig_signed_data(namespace: &[u8], hash_algorithm: &[u8], message: &[u8]) -
     Some(signed)
 }
 
-fn check_sshsig(key: &Key, keytype: SshKeyType, message: &[u8], sig_hex: &str) -> Result<Option<u8>, SignatureFault> {
+fn check_sshsig(
+    key: &Key,
+    keytype: SshKeyType,
+    namespace: &str,
+    message: &[u8],
+    sig_hex: &str,
+) -> Result<Option<u8>, SignatureFault> {
     let public = ssh_public(key, keytype)?;
     let blob = hex::decode(sig_hex).map_err(|_| SignatureFault::Encoding)?;
     let envelope = parse_sshsig(&blob).ok_or(SignatureFault::Encoding)?;
-    if envelope.namespace != NAMESPACE.as_bytes() {
+    if envelope.namespace != namespace.as_bytes() {
         return Err(SignatureFault::Namespace(String::from_utf8_lossy(envelope.namespace).into_owned()));
     }
     if envelope.public_key != public.wire.as_slice() {
@@ -1293,6 +1357,174 @@ fn scalar_bytes(mpint: &[u8]) -> Option<p256::FieldBytes> {
 }
 ```
 
+## Batch signatures
+
+A FIDO2 token signs once per touch. Alice releases chariot to `fleet` with
+her token, and the root lists her token for the snapshot and the timestamp
+too, so the release is three files: `fleet.json`, `snapshot.json` and
+`timestamp.json`. Three single signatures are three touches. A **batch
+signature** is one signature that counts on several files, so the release
+is one touch (decision §3).
+
+The signer signs a **batch statement**: a small JSON object that lists each
+file it covers by its `_type`, its role, its version and the SHA-256 of the
+canonical bytes of its `signed` body.
+
+```json
+{
+  "_type": "release-metadata-batch",
+  "files": [
+    { "_type": "targets", "role": "fleet", "version": 4, "hashes": { "sha256": "9f2c…" } },
+    { "_type": "snapshot", "role": "snapshot", "version": 9, "hashes": { "sha256": "41ab…" } },
+    { "_type": "timestamp", "role": "timestamp", "version": 12, "hashes": { "sha256": "c07e…" } }
+  ]
+}
+```
+
+The role is the top-level role's name, or a delegated role's name, such as
+an audience. Each covered file gets an ordinary signature entry: the
+`keyid`, and as `sig` the one batch signature, in hex like every
+signature. The entry also holds the statement itself, in
+`x-release-metadata-batch`, so a reader of one file has what the signer
+signed. A TUF client reads past the extra field.
+
+The signature covers the statement's canonical bytes. An SSHSIG signature
+is made under its own namespace, `release-metadata-batch`, so a batch
+signature never verifies as a signature over one file, and a signature
+over one file never verifies as a batch signature. TUF's `ed25519` scheme
+has no namespace; there the statement's `_type` keeps the two apart, since
+no role's body has the type `release-metadata-batch`, and the check below
+refuses a statement of any other type. Every scheme signs a statement as it
+signs a body: a FIDO2 token over the U2F blob, and a passkey with the
+statement's SSHSIG blob as its WebAuthn challenge.
+
+A batch signature counts on a file when two things hold. The signature
+verifies over the statement, under the batch namespace. And the statement
+lists this file: an entry of this file's type and role, with this file's
+version and the hash of this file's body. A statement that lists the same
+type and role twice is not one the verifier reads. Then the signature is
+the key's signature on this file, and the signatory's rule applies to it as
+to a single one: it is one of their keys, and an `sk` signature carries the
+flags their rule demands. Thresholds and the count of signatories do not
+change.
+
+<a name="chunk-batch"></a><sub>[`src/batch.rs`](../../crates/x0k-release-metadata/src/batch.rs) · `#batch` · assembles [batch-statement](#chunk-batch-statement)</sub>
+
+```rust {#batch file="src/batch.rs"}
+use std::collections::{BTreeMap, BTreeSet};
+
+use serde::Deserialize;
+use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
+
+use crate::canonical::{canonical_json, Covered, Signature};
+use crate::scheme::check_signature;
+use crate::verify::hex_digest;
+use crate::{Key, SignatureFault, NAMESPACE};
+
+/// The SSHSIG namespace a batch signature is made under (decision §3).
+pub const BATCH_NAMESPACE: &str = "release-metadata-batch";
+
+/// The `_type` of a batch statement.
+const BATCH_TYPE: &str = "release-metadata-batch";
+
+/// Checks one signature entry by `key` on the file `covered` of `role`, and
+/// returns the flags an `sk` signature carries: a single signature over the
+/// file's body, or a batch signature over a statement that lists the file.
+pub(crate) fn check_entry(
+    key: &Key,
+    role: &str,
+    covered: &Covered<'_>,
+    signature: &Signature,
+) -> Result<Option<u8>, SignatureFault> {
+    let Some(statement) = &signature.batch else {
+        return check_signature(key, NAMESPACE, covered.canonical, &signature.sig);
+    };
+    let message = canonical_json(statement).map_err(|_| SignatureFault::BatchStatement)?;
+    let flags = check_signature(key, BATCH_NAMESPACE, &message, &signature.sig)?;
+    check_listed(statement, role, covered)?;
+    Ok(flags)
+}
+
+<<batch-statement>>
+```
+
+The statement is read as its own small type. Each listed hash must be one
+the verifier knows and must match, and at least one must be listed; the
+writer lists SHA-256.
+
+<a name="chunk-batch-statement"></a><sub>[`src/lib.rs`](../../crates/x0k-release-metadata/src/lib.rs) · `#batch-statement`</sub>
+
+```rust {#batch-statement}
+#[derive(Deserialize)]
+struct Statement {
+    #[serde(rename = "_type")]
+    kind: String,
+    files: Vec<Listed>,
+}
+
+#[derive(Deserialize)]
+struct Listed {
+    #[serde(rename = "_type")]
+    kind: String,
+    role: String,
+    version: u64,
+    hashes: BTreeMap<String, String>,
+}
+
+/// Refuses a statement that does not list `covered` as the file of `role`.
+fn check_listed(statement: &Value, role: &str, covered: &Covered<'_>) -> Result<(), SignatureFault> {
+    let statement = Statement::deserialize(statement).map_err(|_| SignatureFault::BatchStatement)?;
+    let mut seen = BTreeSet::new();
+    let distinct = statement.files.iter().all(|file| seen.insert((file.kind.as_str(), file.role.as_str())));
+    if statement.kind != BATCH_TYPE || !distinct {
+        return Err(SignatureFault::BatchStatement);
+    }
+    let listed = statement
+        .files
+        .iter()
+        .find(|file| file.kind == covered.kind && file.role == role)
+        .ok_or_else(|| SignatureFault::BatchUnlisted { kind: covered.kind.to_owned(), role: role.to_owned() })?;
+    if listed.version != covered.version {
+        return Err(SignatureFault::BatchVersion { listed: listed.version, offered: covered.version });
+    }
+    if listed.hashes.is_empty() {
+        return Err(SignatureFault::BatchStatement);
+    }
+    for (algorithm, want) in &listed.hashes {
+        let got = hex_digest(algorithm, covered.canonical).ok_or(SignatureFault::BatchStatement)?;
+        if !got.eq_ignore_ascii_case(want) {
+            return Err(SignatureFault::BatchHash);
+        }
+    }
+    Ok(())
+}
+
+/// One file as a batch statement lists it.
+pub(crate) fn listing(covered: &Covered<'_>, role: &str) -> Value {
+    let sha256 = hex::encode(Sha256::digest(covered.canonical));
+    json!({ "_type": covered.kind, "role": role, "version": covered.version, "hashes": { "sha256": sha256 } })
+}
+
+/// The statement a batch signature signs: `files`, in order.
+pub(crate) fn statement(files: Vec<Value>) -> Value {
+    json!({ "_type": BATCH_TYPE, "files": files })
+}
+```
+
+A batch signature on a snapshot or a timestamp brings one more rule, the
+listing by version (decision §6). A whole file's hashes cover its
+signatures, so a snapshot cannot list the hashes of a targets file whose
+signature is made in the same step as the snapshot's own. The ceremony
+then lists that file by version only, as TUF allows. The verifier needs
+nothing new for it: a listing without a length or hashes is checked by
+version alone ("The checks", below). So a snapshot that lists `fleet.json`
+at version 4 accepts any `fleet` file of version 4 that meets the `fleet`
+role's threshold. Two different files of one version exist only if the
+role's signatories signed both. A file of that version made by anyone else
+still carries no signature that counts: a batch signature taken from the
+real file names the real body's hash, and does not count on another.
+
 ## Counting signatories
 
 TUF counts distinct keys toward a threshold. Alice holds two keys, so under
@@ -1300,7 +1532,9 @@ TUF's count she alone meets a threshold of two. §4 counts signatories
 instead. The counting has three steps:
 
 1. Each signature whose key id the role lists is checked once. A repeated
-   key id counts once, as TUF requires.
+   key id counts once, as TUF requires. A batch signature is checked over
+   its statement, and counts only when the statement lists this file
+   ("Batch signatures", above).
 2. A signatory counts when at least their rule's number of their keys
    verified, each signature carrying the flags their rule demands. A rule
    can demand `user-present`, that a person touched the token, and
@@ -1319,10 +1553,10 @@ each writes it.
 ```rust {#quorum file="src/quorum.rs"}
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::canonical::Signature;
+use crate::canonical::{Covered, Signature};
 use crate::scheme::{public_identity, PublicIdentity};
 use crate::{
-    scheme, Key, ListedKey, Malformed, Refusal, Rule, SignatoryRule, SignatoryVerdict, SignatureFault,
+    batch, scheme, Key, ListedKey, Malformed, Refusal, Rule, SignatoryRule, SignatoryVerdict, SignatureFault,
 };
 
 /// A checked key listing: key ids that match their keys, one id per public key.
@@ -1437,11 +1671,11 @@ impl Quorum<'_> {
     /// Refuses unless enough signatories count; `rule` words the failure.
     pub(crate) fn require(
         &self,
-        message: &[u8],
+        covered: &Covered<'_>,
         signatures: &[Signature],
         rule: impl FnOnce(u64, u64) -> Rule,
     ) -> Result<(), Refusal> {
-        let tally = self.tally(message, signatures);
+        let tally = self.tally(covered, signatures);
         if tally.counted >= self.threshold {
             return Ok(());
         }
@@ -1456,8 +1690,8 @@ impl Quorum<'_> {
     }
 
     /// Refuses unless every signatory the role lists counts (decision §8).
-    pub(crate) fn require_every(&self, message: &[u8], signatures: &[Signature]) -> Result<(), Refusal> {
-        let tally = self.tally(message, signatures);
+    pub(crate) fn require_every(&self, covered: &Covered<'_>, signatures: &[Signature]) -> Result<(), Refusal> {
+        let tally = self.tally(covered, signatures);
         let signatories = self.signatory_count();
         if tally.counted >= signatories {
             return Ok(());
@@ -1480,8 +1714,8 @@ impl Quorum<'_> {
         named.len() as u64
     }
 
-    /// Counts the signatories whose signatures over `message` verify.
-    pub(crate) fn tally(&self, message: &[u8], signatures: &[Signature]) -> Tally {
+    /// Counts the signatories whose signatures on the file `covered` verify.
+    pub(crate) fn tally(&self, covered: &Covered<'_>, signatures: &[Signature]) -> Tally {
         let mut verdicts: BTreeMap<String, SignatoryVerdict> = BTreeMap::new();
         for keyid in self.keyids {
             if let Some(key) = self.ring.keys.get(keyid.as_str()) {
@@ -1514,7 +1748,7 @@ impl Quorum<'_> {
                 continue;
             };
             let required = self.rules.get(&verdict.signatory).map_or(&[][..], |rule| rule.flags.as_slice());
-            match scheme::check_signature(key, message, &signature.sig) {
+            match batch::check_entry(key, self.role, covered, signature) {
                 Ok(flags) => match required.iter().find(|flag| flags.is_none_or(|bits| bits & flag.bit() == 0)) {
                     Some(missing) => verdict.faults.push((signature.keyid.clone(), SignatureFault::MissingFlag(missing.name()))),
                     None => verdict.valid_keys += 1,
@@ -1695,7 +1929,7 @@ fn update_root<'f>(
         for keys_of in [&current, &next.body] {
             let version = keys_of.version;
             role_quorum(keys_of, "root", |quorum| {
-                quorum.require(&next.canonical, &next.signatures, |threshold, counted| {
+                quorum.require(&next.covered(), &next.signatures, |threshold, counted| {
                     Rule::RootThreshold { keys_of: version, threshold, counted }
                 })
             })?;
@@ -1755,7 +1989,7 @@ fn update_timestamp(
 ) -> Result<Timestamp, Refusal> {
     let role = "timestamp";
     let new: Envelope<Timestamp> = open_envelope(&fetched.timestamp).map_err(|e| Refusal::new(role, e))?;
-    role_quorum(root, role, |q| q.require(&new.canonical, &new.signatures, threshold))?;
+    role_quorum(root, role, |q| q.require(&new.covered(), &new.signatures, threshold))?;
     if let Some(bytes) = trusted {
         let old: Envelope<Timestamp> = open_envelope(&bytes).map_err(|e| Refusal::new(role, e))?;
         check_not_lower(role, old.body.version, new.body.version)?;
@@ -1800,7 +2034,7 @@ fn update_snapshot(
     let listed = snapshot_listing(timestamp)?;
     check_listing(role, "timestamp", listed, &fetched.snapshot)?;
     let new: Envelope<Snapshot> = open_envelope(&fetched.snapshot).map_err(|e| Refusal::new(role, e))?;
-    role_quorum(root, role, |q| q.require(&new.canonical, &new.signatures, threshold))?;
+    role_quorum(root, role, |q| q.require(&new.covered(), &new.signatures, threshold))?;
     check_listed_version(role, "timestamp", listed, new.body.version)?;
     if let Some(bytes) = trusted {
         let old: Envelope<Snapshot> = open_envelope(&bytes).map_err(|e| Refusal::new(role, e))?;
@@ -1861,9 +2095,9 @@ fn load_targets(
         .ok_or_else(|| Refusal::new(role, Rule::Missing))?;
     check_listing(role, "snapshot", listed, bytes)?;
     let envelope: Envelope<Targets> = open_envelope(bytes).map_err(|e| Refusal::new(role, e))?;
-    quorum.require(&envelope.canonical, &envelope.signatures, threshold)?;
+    quorum.require(&envelope.covered(), &envelope.signatures, threshold)?;
     if public && envelope.body.delegates() {
-        quorum.require_every(&envelope.canonical, &envelope.signatures)?;
+        quorum.require_every(&envelope.covered(), &envelope.signatures)?;
     }
     check_listed_version(role, "snapshot", listed, envelope.body.version)?;
     check_expiry(role, &envelope.body, now)?;
@@ -2072,7 +2306,7 @@ ceremony tests a scratch directory.
 ```toml {#manifest file="Cargo.toml"}
 [package]
 name = "x0k-release-metadata"
-version = "0.2.1"
+version = "0.3.0"
 edition = { workspace = true }
 license = "MIT"
 description = "Verifies a release against a root of trust its maintainers sign: TUF metadata, thresholds of signatories, and SSHSIG signatures"
@@ -2121,8 +2355,9 @@ its crates fetch or serve anything.
 ```rust {#purity-tests file="tests/conformance/purity.rs"}
 //! Decision §7: the verifier opens no connection and reads no clock.
 
-const SOURCES: [(&str, &str); 9] = [
+const SOURCES: [(&str, &str); 10] = [
     ("lib.rs", include_str!("../../src/lib.rs")),
+    ("batch.rs", include_str!("../../src/batch.rs")),
     ("canonical.rs", include_str!("../../src/canonical.rs")),
     ("ceremony.rs", include_str!("../../src/ceremony.rs")),
     ("metadata.rs", include_str!("../../src/metadata.rs")),

@@ -3,7 +3,7 @@
 ```turtle folio:document
 architecture:release-metadata a x0k:Architecture ;
     x0k:status "accepted" ;
-    x0k:summary "A user's machine installs a release only when the publisher's root says that enough maintainers signed it for that machine's audience. The root names each maintainer, their keys, and how many maintainers must sign each record. Each record has a version and an expiry date, so an old or withheld release does not verify. Each signature is an SSHSIG envelope, so FIDO2 tokens, Secure Enclave keys, phone passkeys and software keys make one format. A threshold counts maintainers, not keys. The root changes only when enough maintainers of the old version and of the new version sign the new version, one at a time. The record layout is TUF's, and the verifier is a pure function, published alone." ;
+    x0k:summary "A user's machine installs a release only when the publisher's root says that enough maintainers signed it for that machine's audience. The root names each maintainer, their keys, and how many maintainers must sign each record. Each record has a version and an expiry date, so an old or withheld release does not verify. Each signature is an SSHSIG envelope, so FIDO2 tokens, Secure Enclave keys, phone passkeys and software keys make one format, and one signature can cover several records, so a release takes one touch of a security key. A threshold counts maintainers, not keys. The root changes only when enough maintainers of the old version and of the new version sign the new version, one at a time. The record layout is TUF's, and the verifier is a pure function, published alone." ;
     x0k:concerns "trust", "delivery", "publication", "signing", "keys" ;
     x0k:supports design:distribution-and-updates ;
     x0k:dependsOn architecture:service-authorization ;
@@ -29,8 +29,10 @@ many of them must sign, and which of their devices count.
 
 A maintainer signs with a key that they already have. This can be a FIDO2
 token, the Mac's Secure Enclave through an app such as Secretive, a passkey
-on a phone, or a key file. All of these make the same kind of signature. A
-user's machine checks each release against the record. It refuses the
+on a phone, or a key file. All of these make the same kind of signature.
+One signature can cover every file of a release, so a maintainer touches
+their security key once per release. A user's machine checks each release
+against the record. It refuses the
 release if too few maintainers signed it, or if they signed it for a
 different audience. It also refuses it if the rule of a maintainer was not
 met, for example "two of my keys" or "a touch on the token".
@@ -174,7 +176,7 @@ x0k carries a file across one of its own boundaries, which use canonical
 CBOR, the record holds the signed JSON bytes as one opaque field and never
 encodes them again.
 
-<a name="folio-instance-78306b3a6f70656e2d7175657374696f6e2f72656c656173652d6d657461646174612d656e636f64696e67-1"></a><sub data-instance-iri="x0k:open-question/release-metadata-encoding" data-concept-iri="https://0k.computer/ontology#OpenQuestion" data-source-document="corpora/x0k/decisions/architecture/delivery/release-metadata.md"><strong>OpenQuestion</strong> · Unresolved instance · <code>x0k:open-question/release-metadata-encoding</code> · <a href="#folio-source-78306b3a6f70656e2d7175657374696f6e2f72656c656173652d6d657461646174612d656e636f64696e67-1">source declaration</a> · the graph block at line 178 is not Turtle: The prefix open-question: has not been declared at corpora/x0k/decisions/architecture/delivery/release-metadata.md:177</sub><a name="folio-source-78306b3a6f70656e2d7175657374696f6e2f72656c656173652d6d657461646174612d656e636f64696e67-1"></a>
+<a name="folio-instance-78306b3a6f70656e2d7175657374696f6e2f72656c656173652d6d657461646174612d656e636f64696e67-1"></a><sub data-instance-iri="x0k:open-question/release-metadata-encoding" data-concept-iri="https://0k.computer/ontology#OpenQuestion" data-source-document="corpora/x0k/decisions/architecture/delivery/release-metadata.md"><strong>OpenQuestion</strong> · Unresolved instance · <code>x0k:open-question/release-metadata-encoding</code> · <a href="#folio-source-78306b3a6f70656e2d7175657374696f6e2f72656c656173652d6d657461646174612d656e636f64696e67-1">source declaration</a> · the graph block at line 180 is not Turtle: The prefix open-question: has not been declared at corpora/x0k/decisions/architecture/delivery/release-metadata.md:179</sub><a name="folio-source-78306b3a6f70656e2d7175657374696f6e2f72656c656173652d6d657461646174612d656e636f64696e67-1"></a>
 
 ```turtle folio:graph
 @prefix open-question: <https://0k.computer/ontology#open-question/> .
@@ -228,7 +230,7 @@ Each root sets every threshold, and no audience has a fixed one.
 chariot's root needs two signatories to change, so admitting or removing a
 maintainer takes two of them, and one signatory signs a release.
 
-<a name="folio-instance-78306b3a6f70656e2d7175657374696f6e2f72656c656173652d6d657461646174612d7075626c69632d72756e67-2"></a><sub data-instance-iri="x0k:open-question/release-metadata-public-rung" data-concept-iri="https://0k.computer/ontology#OpenQuestion" data-source-document="corpora/x0k/decisions/architecture/delivery/release-metadata.md"><strong>OpenQuestion</strong> · Unresolved instance · <code>x0k:open-question/release-metadata-public-rung</code> · <a href="#folio-source-78306b3a6f70656e2d7175657374696f6e2f72656c656173652d6d657461646174612d7075626c69632d72756e67-2">source declaration</a> · the graph block at line 178 is not Turtle: The prefix open-question: has not been declared at corpora/x0k/decisions/architecture/delivery/release-metadata.md:177</sub><a name="folio-source-78306b3a6f70656e2d7175657374696f6e2f72656c656173652d6d657461646174612d7075626c69632d72756e67-2"></a>
+<a name="folio-instance-78306b3a6f70656e2d7175657374696f6e2f72656c656173652d6d657461646174612d7075626c69632d72756e67-2"></a><sub data-instance-iri="x0k:open-question/release-metadata-public-rung" data-concept-iri="https://0k.computer/ontology#OpenQuestion" data-source-document="corpora/x0k/decisions/architecture/delivery/release-metadata.md"><strong>OpenQuestion</strong> · Unresolved instance · <code>x0k:open-question/release-metadata-public-rung</code> · <a href="#folio-source-78306b3a6f70656e2d7175657374696f6e2f72656c656173652d6d657461646174612d7075626c69632d72756e67-2">source declaration</a> · the graph block at line 180 is not Turtle: The prefix open-question: has not been declared at corpora/x0k/decisions/architecture/delivery/release-metadata.md:179</sub><a name="folio-source-78306b3a6f70656e2d7175657374696f6e2f72656c656173652d6d657461646174612d7075626c69632d72756e67-2"></a>
 
 ```turtle folio:graph
 @prefix open-question: <https://0k.computer/ontology#open-question/> .
@@ -238,7 +240,7 @@ open-question:release-metadata-public-rung a x0k:OpenQuestion ;
     x0k:status "resolved" .
 ```
 
-<a name="folio-instance-78306b3a6f70656e2d7175657374696f6e2f72656c656173652d6d657461646174612d61686561642d6f662d74696d65-3"></a><sub data-instance-iri="x0k:open-question/release-metadata-ahead-of-time" data-concept-iri="https://0k.computer/ontology#OpenQuestion" data-source-document="corpora/x0k/decisions/architecture/delivery/release-metadata.md"><strong>OpenQuestion</strong> · Unresolved instance · <code>x0k:open-question/release-metadata-ahead-of-time</code> · <a href="#folio-source-78306b3a6f70656e2d7175657374696f6e2f72656c656173652d6d657461646174612d61686561642d6f662d74696d65-3">source declaration</a> · the graph block at line 178 is not Turtle: The prefix open-question: has not been declared at corpora/x0k/decisions/architecture/delivery/release-metadata.md:177</sub><a name="folio-source-78306b3a6f70656e2d7175657374696f6e2f72656c656173652d6d657461646174612d61686561642d6f662d74696d65-3"></a>
+<a name="folio-instance-78306b3a6f70656e2d7175657374696f6e2f72656c656173652d6d657461646174612d61686561642d6f662d74696d65-3"></a><sub data-instance-iri="x0k:open-question/release-metadata-ahead-of-time" data-concept-iri="https://0k.computer/ontology#OpenQuestion" data-source-document="corpora/x0k/decisions/architecture/delivery/release-metadata.md"><strong>OpenQuestion</strong> · Unresolved instance · <code>x0k:open-question/release-metadata-ahead-of-time</code> · <a href="#folio-source-78306b3a6f70656e2d7175657374696f6e2f72656c656173652d6d657461646174612d61686561642d6f662d74696d65-3">source declaration</a> · the graph block at line 180 is not Turtle: The prefix open-question: has not been declared at corpora/x0k/decisions/architecture/delivery/release-metadata.md:179</sub><a name="folio-source-78306b3a6f70656e2d7175657374696f6e2f72656c656173652d6d657461646174612d61686561642d6f662d74696d65-3"></a>
 
 ```turtle folio:graph
 @prefix open-question: <https://0k.computer/ontology#open-question/> .
@@ -250,19 +252,30 @@ open-question:release-metadata-ahead-of-time a x0k:OpenQuestion ;
 
 ### 3. Every signature is an SSHSIG envelope
 
-**Decides:** the signature format and which keys can sign.
+**Decides:** the signature format, which keys can sign, and how one
+signature covers several files.
 **Invariants:** a signature covers the canonical bytes of the `signed`
-body under the namespace `release-metadata`; the package verifies every
-scheme itself and runs no program to do it; a WebAuthn signature's client
-data carries those bytes' SSHSIG blob as its challenge, and the verifier
+body under the namespace `release-metadata`, or the canonical bytes of a
+batch statement under the namespace `release-metadata-batch`; a batch
+signature counts on a file only when its statement lists that file's
+type, role, version and body hash; the package verifies every scheme
+itself and runs no program to do it; a WebAuthn signature's client data
+carries the signed bytes' SSHSIG blob as its challenge, and the verifier
 checks its origin for form only.
 **On failure:** the verifier does not count a signature under another
-namespace, of an unknown scheme, by a key the role does not list, or with
-client data that carries another challenge, and names which.
+namespace, of an unknown scheme, by a key the role does not list, with
+client data that carries another challenge, or whose batch statement does
+not list this file or lists another version or body hash, and names
+which.
 **Checked by:** the conformance vectors, one per scheme, each signature
 made by the real signer; a passkey signature whose client data carries
 another challenge does not count; a passkey signature made with the
-origin `http://localhost:8000` counts.
+origin `http://localhost:8000` counts; one batch signature per scheme
+counts on each file it lists; a batch signature under the single
+namespace, a single signature under the batch namespace, and a batch
+statement that omits the file or lists another hash, version, role or
+type do not count; a token's batch signature without the touch flag does
+not count where the rule demands it.
 
 A signature is a value that only the holder of a private key can make over
 some bytes. Anyone with the matching public key can check it. TUF's own
@@ -311,7 +324,40 @@ commit signature or a file signature that the same key made. A new signing
 method adds a scheme name and its verifier, and it changes no metadata
 field.
 
-<a name="folio-instance-78306b3a746563686e652f7665726966792d612d72656c656173652d616761696e73742d6974732d726f6f74-4"></a><sub data-instance-iri="x0k:techne/verify-a-release-against-its-root" data-concept-iri="https://0k.computer/ontology#Techne" data-source-document="corpora/x0k/decisions/architecture/delivery/release-metadata.md"><strong>Techne</strong> · Unresolved instance · <code>x0k:techne/verify-a-release-against-its-root</code> · <a href="#folio-source-78306b3a746563686e652f7665726966792d612d72656c656173652d616761696e73742d6974732d726f6f74-4">source declaration</a> · the graph block at line 178 is not Turtle: The prefix open-question: has not been declared at corpora/x0k/decisions/architecture/delivery/release-metadata.md:177</sub><a name="folio-source-78306b3a746563686e652f7665726966792d612d72656c656173652d616761696e73742d6974732d726f6f74-4"></a>
+A FIDO2 token makes one signature per touch, and a release is several
+files. So one signature can cover several files: a **batch signature**.
+The signer signs a batch statement, a canonical JSON object whose `_type`
+is `release-metadata-batch` and whose `files` list names each covered
+file by its `_type`, its role, its `version` and the SHA-256 of the
+canonical bytes of its `signed` body:
+
+```json
+{ "_type": "release-metadata-batch",
+  "files": [ { "_type": "targets", "role": "stable", "version": 4, "hashes": { "sha256": "…" } },
+             { "_type": "snapshot", "role": "snapshot", "version": 9, "hashes": { "sha256": "…" } } ] }
+```
+
+The role is a top-level role's name or a delegated role's name. Each
+covered file carries an ordinary `signatures` entry: the `keyid`, the one
+batch signature as `sig`, and the statement in
+`x-release-metadata-batch`. A TUF client reads past that field. An SSHSIG
+batch signature is made under its own namespace, `release-metadata-batch`,
+so it never verifies as a signature over one file, and a signature over
+one file never verifies as a batch signature. TUF's `ed25519` scheme has
+no namespace; there the statement's `_type` keeps the two apart, because
+no role's body has that type.
+
+The verifier counts a batch signature on a file when the signature
+verifies over the statement and the statement lists this file's type,
+role, version and body hash. The signature then counts as that key's
+signature on the file. The signatory's rule applies to it as to any other
+signature: it is one of their keys, and an `sk` signature carries the
+flags the rule demands. Every scheme signs a statement as it signs a body,
+and a passkey's client data carries the statement's SSHSIG blob as its
+challenge. A signature over one file keeps its form, so a file signed
+before batch signatures existed verifies unchanged.
+
+<a name="folio-instance-78306b3a746563686e652f7665726966792d612d72656c656173652d616761696e73742d6974732d726f6f74-4"></a><sub data-instance-iri="x0k:techne/verify-a-release-against-its-root" data-concept-iri="https://0k.computer/ontology#Techne" data-source-document="corpora/x0k/decisions/architecture/delivery/release-metadata.md"><strong>Techne</strong> · Unresolved instance · <code>x0k:techne/verify-a-release-against-its-root</code> · <a href="#folio-source-78306b3a746563686e652f7665726966792d612d72656c656173652d616761696e73742d6974732d726f6f74-4">source declaration</a> · the graph block at line 180 is not Turtle: The prefix open-question: has not been declared at corpora/x0k/decisions/architecture/delivery/release-metadata.md:179</sub><a name="folio-source-78306b3a746563686e652f7665726966792d612d72656c656173652d616761696e73742d6974732d726f6f74-4"></a>
 
 ```turtle folio:graph
 @prefix techne: <https://0k.computer/ontology#techne/> .
@@ -425,12 +471,18 @@ dependence on a pull request:
 3. The package shows which signatories are still missing, until both
    thresholds are met.
 
-No signer sees the key of another signer. The keys of the root role sign
+A signer adds one signature per signing, however many staged files it
+covers (§3). When the new root changes the top-level targets file, a
+signer whose key both files' thresholds list signs the root and that
+targets file with one batch signature, so the ceremony takes one touch
+from each signer. The targets file is checked against the new root,
+because that is the root a reader holds when it reads that file. No
+signer sees the key of another signer. The keys of the root role sign
 only roots. A first root, version 1, has no earlier version, so only its
 own threshold applies, and the same ceremony signs it one signatory after
 another; each reader pins it at install (§1).
 
-<a name="folio-instance-78306b3a746563686e652f7369676e2d612d726f6f742d6f6e652d7369676e61746f72792d61742d612d74696d65-5"></a><sub data-instance-iri="x0k:techne/sign-a-root-one-signatory-at-a-time" data-concept-iri="https://0k.computer/ontology#Techne" data-source-document="corpora/x0k/decisions/architecture/delivery/release-metadata.md"><strong>Techne</strong> · Unresolved instance · <code>x0k:techne/sign-a-root-one-signatory-at-a-time</code> · <a href="#folio-source-78306b3a746563686e652f7369676e2d612d726f6f742d6f6e652d7369676e61746f72792d61742d612d74696d65-5">source declaration</a> · the graph block at line 178 is not Turtle: The prefix open-question: has not been declared at corpora/x0k/decisions/architecture/delivery/release-metadata.md:177</sub><a name="folio-source-78306b3a746563686e652f7369676e2d612d726f6f742d6f6e652d7369676e61746f72792d61742d612d74696d65-5"></a>
+<a name="folio-instance-78306b3a746563686e652f7369676e2d612d726f6f742d6f6e652d7369676e61746f72792d61742d612d74696d65-5"></a><sub data-instance-iri="x0k:techne/sign-a-root-one-signatory-at-a-time" data-concept-iri="https://0k.computer/ontology#Techne" data-source-document="corpora/x0k/decisions/architecture/delivery/release-metadata.md"><strong>Techne</strong> · Unresolved instance · <code>x0k:techne/sign-a-root-one-signatory-at-a-time</code> · <a href="#folio-source-78306b3a746563686e652f7369676e2d612d726f6f742d6f6e652d7369676e61746f72792d61742d612d74696d65-5">source declaration</a> · the graph block at line 180 is not Turtle: The prefix open-question: has not been declared at corpora/x0k/decisions/architecture/delivery/release-metadata.md:179</sub><a name="folio-source-78306b3a746563686e652f7369676e2d612d726f6f742d6f6e652d7369676e61746f72792d61742d612d74696d65-5"></a>
 
 ```turtle folio:graph
 @prefix techne: <https://0k.computer/ontology#techne/> .
@@ -445,13 +497,18 @@ techne:sign-a-root-one-signatory-at-a-time a x0k:Techne ;
 **Invariants:** no key that signs root or targets metadata is on a build
 server; every metadata file is public; the signing command signs a
 targets entry only when its hashes match the signer's own rebuild, or when
-the signer states that the build is not reproducible.
+the signer states that the build is not reproducible; a snapshot or
+timestamp signed in the same batch as a file it lists lists that file by
+version only.
 **On failure:** a thief with the online key can withhold the newest
 release until the timestamp expires, and cannot make a release verify.
 **Checked by:** the conformance vectors: the verifier refuses targets
-metadata signed only by the online key; a ceremony test whose rebuild
-differs from the targets entry, or that gives no rebuild, is refused by
-the signing command.
+metadata signed only by the online key; a release whose targets file,
+snapshot and timestamp one key signs in one batch verifies; under a
+version-only listing, another file of that version verifies only when
+its role's signatories signed it. Ceremony tests: a rebuild that differs
+from the targets entry, or no rebuild, is refused by the signing command;
+a release is signed with one call to the signer.
 
 The timestamp expires soon, so a key must sign a new one often. A person
 cannot sign it each day, so a key on the build server signs it. That key
@@ -465,6 +522,21 @@ key's object uses the `sshsig-ssh-ed25519` scheme. A thief with this key can
 sign a new timestamp for an old snapshot. That makes a freeze last longer,
 but it cannot make a reader accept an artifact that a maintainer did not
 sign.
+
+A root may also list a maintainer's key for the snapshot and timestamp
+roles. That maintainer then signs a release in one step: the targets file
+of the release's role, the snapshot that lists it, and the timestamp that
+lists the snapshot, with one batch signature (§3), so the release takes
+one touch. The online key still refreshes the timestamp between releases.
+A listing of a whole file's hashes covers that file's signatures, so a
+snapshot cannot list the hashes of a file signed in the same batch. The
+package therefore lists such a file by version only, which TUF allows,
+and lists every other file by version, length and hashes. The verifier
+checks a version-only listing by version: it accepts a file of that
+version that meets its role's threshold. Two different files of one
+version exist only if that role's signatories signed both. A file made by
+anyone else carries no signature that counts, because a batch signature
+taken from the real file names the real body's hash.
 
 A build makes the artifacts and the unsigned targets entries. Then a key
 of a maintainer signs them. A signature is not a secret. The metadata is
@@ -485,7 +557,7 @@ approved a release, not how it was built, and the publisher's threat
 model says so. in-toto layouts, which record each build
 step and who performed it, can be a later scheme.
 
-<a name="folio-instance-78306b3a6f70656e2d7175657374696f6e2f72656c656173652d6d657461646174612d6275696c642d636f6d70726f6d697365-6"></a><sub data-instance-iri="x0k:open-question/release-metadata-build-compromise" data-concept-iri="https://0k.computer/ontology#OpenQuestion" data-source-document="corpora/x0k/decisions/architecture/delivery/release-metadata.md"><strong>OpenQuestion</strong> · Unresolved instance · <code>x0k:open-question/release-metadata-build-compromise</code> · <a href="#folio-source-78306b3a6f70656e2d7175657374696f6e2f72656c656173652d6d657461646174612d6275696c642d636f6d70726f6d697365-6">source declaration</a> · the graph block at line 178 is not Turtle: The prefix open-question: has not been declared at corpora/x0k/decisions/architecture/delivery/release-metadata.md:177</sub><a name="folio-source-78306b3a6f70656e2d7175657374696f6e2f72656c656173652d6d657461646174612d6275696c642d636f6d70726f6d697365-6"></a>
+<a name="folio-instance-78306b3a6f70656e2d7175657374696f6e2f72656c656173652d6d657461646174612d6275696c642d636f6d70726f6d697365-6"></a><sub data-instance-iri="x0k:open-question/release-metadata-build-compromise" data-concept-iri="https://0k.computer/ontology#OpenQuestion" data-source-document="corpora/x0k/decisions/architecture/delivery/release-metadata.md"><strong>OpenQuestion</strong> · Unresolved instance · <code>x0k:open-question/release-metadata-build-compromise</code> · <a href="#folio-source-78306b3a6f70656e2d7175657374696f6e2f72656c656173652d6d657461646174612d6275696c642d636f6d70726f6d697365-6">source declaration</a> · the graph block at line 180 is not Turtle: The prefix open-question: has not been declared at corpora/x0k/decisions/architecture/delivery/release-metadata.md:179</sub><a name="folio-source-78306b3a6f70656e2d7175657374696f6e2f72656c656173652d6d657461646174612d6275696c642d636f6d70726f6d697365-6"></a>
 
 ```turtle folio:graph
 @prefix open-question: <https://0k.computer/ontology#open-question/> .
@@ -603,6 +675,14 @@ make a raw signature over arbitrary bytes (§3). Every signer that the
 maintainers named already makes SSHSIG with tools they have. SSHSIG also
 lets a verifier see a touch after the signature is made.
 
+**A batch statement instead of one signature per file.** A token makes one
+signature per touch, so a release of three files signed one file at a
+time is three touches. A statement that names each file's type, role,
+version and body hash lets one signature count on each file, and a reader
+of one file still checks a signature that names exactly that file. A
+signature over the snapshot alone would not do this: the targets role's
+threshold must be met by signatures on the targets file itself.
+
 ## Consequences
 
 - A publisher with one maintainer and one key writes a root with
@@ -612,7 +692,8 @@ lets a verifier see a touch after the signature is made.
   sets the root threshold against that risk.
 - A maintainer signs each release by hand for every audience whose role
   has no online key. Automation can build, stage and send reminders, but
-  it cannot sign.
+  it cannot sign. One touch signs the whole release when the root lists
+  the maintainer's key for the snapshot and the timestamp too.
 - A publisher whose build is not reproducible gets no rebuild check, and
   its threat model states that gap.
 - Desktops sign through OpenSSH or an SSH agent. Phones need a small

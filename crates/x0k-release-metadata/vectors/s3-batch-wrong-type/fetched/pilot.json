@@ -1,0 +1,36 @@
+{
+  "signed": {
+    "_type": "targets",
+    "spec_version": "1.0.37",
+    "version": 1,
+    "expires": "2030-01-01T00:00:00Z",
+    "targets": {}
+  },
+  "signatures": [
+    {
+      "keyid": "b3d7fb720a30715d527368d548cb31ef4ecd24db31d8749370f335cd3fd1254e",
+      "sig": "53534853494700000001000000330000000b7373682d656432353531390000002031debe55d37c722768b137131caa6087080b2e0b60b94bd785d14575cfa498bc0000001672656c656173652d6d657461646174612d62617463680000000000000006736861353132000000530000000b7373682d6564323535313900000040179f4ad45005b3bf7df244cac6d400c2c619a086acb8276ebe67fbe4471b3cc2a03be9e0de19d421bbec4d0bb3b691738095b7d9bda80da77600e563284c3805",
+      "x-release-metadata-batch": {
+        "_type": "release-metadata-batch",
+        "files": [
+          {
+            "_type": "snapshot",
+            "role": "fleet",
+            "version": 1,
+            "hashes": {
+              "sha256": "13e849d35a8722ab2a1d8955cef765e325a48d83fbf3528a0c038d6d28e9d9c5"
+            }
+          },
+          {
+            "_type": "targets",
+            "role": "pilot",
+            "version": 1,
+            "hashes": {
+              "sha256": "6fc6799d6a1c4107d5a161331df5e63c80a35ae58abc6790c59855581f9dc0cc"
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

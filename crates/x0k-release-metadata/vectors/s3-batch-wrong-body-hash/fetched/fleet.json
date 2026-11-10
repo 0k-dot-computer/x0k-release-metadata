@@ -1,0 +1,44 @@
+{
+  "signed": {
+    "_type": "targets",
+    "spec_version": "1.0.37",
+    "version": 1,
+    "expires": "2030-01-01T00:00:00Z",
+    "targets": {
+      "fleet/chariot-1.0.tar": {
+        "length": 12,
+        "hashes": {
+          "sha256": "529562fc496d2dee4d817e3c494918eaff77a1222f23f152bb3bb65141520451",
+          "sha512": "8e756c994c7e09320d5417e2229f470e209de6317cb16502f173e980ff9359a89dacb34349e39aafede7e490e70fb2d4ecc401e10058f402f045424ce8c7b4ce"
+        }
+      }
+    }
+  },
+  "signatures": [
+    {
+      "keyid": "b3d7fb720a30715d527368d548cb31ef4ecd24db31d8749370f335cd3fd1254e",
+      "sig": "53534853494700000001000000330000000b7373682d656432353531390000002031debe55d37c722768b137131caa6087080b2e0b60b94bd785d14575cfa498bc0000001672656c656173652d6d657461646174612d62617463680000000000000006736861353132000000530000000b7373682d656432353531390000004073be00f33c6ef4a8241cd934c28c57db9da6a7321bfb4d010f71708eff32ab02074bd5b5e61c379642b20679c0bb7657cc96cac8187d3a69aad6085b3c7eae09",
+      "x-release-metadata-batch": {
+        "_type": "release-metadata-batch",
+        "files": [
+          {
+            "_type": "targets",
+            "role": "fleet",
+            "version": 1,
+            "hashes": {
+              "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+            }
+          },
+          {
+            "_type": "targets",
+            "role": "pilot",
+            "version": 1,
+            "hashes": {
+              "sha256": "6fc6799d6a1c4107d5a161331df5e63c80a35ae58abc6790c59855581f9dc0cc"
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

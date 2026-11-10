@@ -1,8 +1,8 @@
 {
   "schema": "x0k.provenance/v1",
   "publication_uri": "x0k:publication/x0k-release-metadata",
-  "corpus_rev": "ysysyttptlnnkuykqwrpruulzpywmttu",
-  "corpus_commit": "0665196a5e5646fd339c459e0d83aa4a6bf86cd9",
+  "corpus_rev": "ssounmpxvvzvvqlylwytzrsswwutnqvk",
+  "corpus_commit": "b5533462a7c9e9fe5f42fe410596a2f1f28b3bcd",
   "path_map": {
     "decisions/architecture/delivery/release-metadata.md": "corpora/x0k/decisions/architecture/delivery/release-metadata.md",
     "implementation/release-metadata/ceremony.md": "corpora/x0k/implementation/release-metadata/ceremony.md",

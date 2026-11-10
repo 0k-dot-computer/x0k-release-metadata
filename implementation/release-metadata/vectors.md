@@ -87,11 +87,36 @@ keys belong to four other people.
 | `s8-public-delegation-every-signatory` | §8 | That delegation, signed by every signatory its role lists, verifies. |
 | `s8-public-release-meets-its-threshold` | §8 | A release in a public audience whose file delegates nothing still needs only its role's threshold. |
 | `s6-targets-signed-only-by-online-key` | §6 | Targets metadata that only the online key signed is refused: the key on the build server signs freshness, never a release. |
+| `s3-batch-ed25519-verifies` | §3 | One TUF `ed25519` signature over a batch statement that lists `fleet` and `pilot` counts on `fleet`. |
+| `s3-batch-sshsig-verifies` | §3 | One SSHSIG signature under `release-metadata-batch` over such a statement counts. |
+| `s3-batch-software-enclave-verifies` | §3 | A P-256 SSHSIG batch signature counts on each file its statement lists (software-made). |
+| `s3-batch-software-fido2-ed25519-verifies` | §3 | An `sk-ssh-ed25519` batch signature over the statement's U2F blob counts (software-made). |
+| `s3-batch-software-fido2-ecdsa-verifies` | §3 | An `sk-ecdsa-sha2-nistp256` batch signature counts (software-made). |
+| `s3-batch-software-passkey-verifies` | §3 | A WebAuthn batch signature, whose client data carries the statement's SSHSIG blob as its challenge, counts (software-made). |
+| `s3-batch-under-single-namespace` | §3 | A batch signature made under `release-metadata` does not count. |
+| `s3-single-under-batch-namespace` | §3 | A signature over one file made under `release-metadata-batch` does not count. |
+| `s3-batch-file-not-listed` | §3 | A batch signature on a file its statement does not list does not count. |
+| `s3-batch-wrong-body-hash` | §3 | A batch signature whose statement lists another hash of the file's body does not count. |
+| `s3-batch-wrong-version` | §3 | A batch signature whose statement lists another version does not count. |
+| `s3-batch-wrong-role` | §3 | A batch signature whose statement lists the body under another role does not count. |
+| `s3-batch-wrong-type` | §3 | A batch signature whose statement lists the body under another type does not count. |
+| `s4-batch-touch-missing` | §4 | A token's batch signature without the touch flag does not count for a signatory whose rule demands one (software-made). |
+| `s4-batch-touch-present` | §4 | The same token's batch signature with the touch flag counts (software-made). |
+| `s6-batch-release-verifies` | §6 | A release whose `fleet` file, snapshot and timestamp one key signs in one batch verifies; the snapshot lists `fleet`, and the timestamp the snapshot, by version only. |
+| `s6-version-only-other-file-signed-by-its-role` | §6 | Under that version-only listing, another `fleet` file of the same version verifies when the `fleet` role's signatories signed it. |
+| `s6-version-only-other-file-unsigned` | §6 | Another `fleet` file of that version carrying only the release's batch signature is refused: the statement names the signed body's hash. |
+| `hw-batch-enclave-ecdsa` | §3 | A Secure Enclave key's own batch signature, made through Secretive by one call to `sign`, counts on both the `fleet` and the `pilot` file its statement lists (hand-signed). |
+| `hw-batch-fido2-ed25519` | §3, §4 | A FIDO2 token's own `sk-ssh-ed25519` batch signature, made with one touch, counts on both files its statement lists for a signatory whose rule demands the touch (hand-signed). |
+| `hw-batch-fido2-ecdsa` | §3, §4 | A FIDO2 token's own `sk-ecdsa-sha2-nistp256` batch signature, made with one touch, counts on both files its statement lists for a signatory whose rule demands the touch (hand-signed). |
+| `hw-batch-passkey-webauthn` | §3 | A phone passkey's own WebAuthn batch signature over the statement's SSHSIG blob, made through Chrome, counts on both files its statement lists (hand-signed). |
 
-The four `hw-` vectors are hand-signed data: the operator's own FIDO2
-token, Secure Enclave key and phone passkey signed them once, through the
-kit of `implementation:release-metadata/hardware-kit`, and their files
-are kept exactly as the kit wrote them. The generator does not write
+The `hw-` vectors are hand-signed data: the operator's own FIDO2 token,
+Secure Enclave key and phone passkey signed them once, through the kit of
+`implementation:release-metadata/hardware-kit`, and their files are kept
+exactly as the kit wrote them. The `hw-batch-` vectors are batch
+signatures, one approval for two files each: a Secure Enclave key through
+Secretive, a FIDO2 token's two key types with one touch, and a phone
+passkey. The generator does not write
 them and never removes them. They are remade only by running the kit
 again, `kit/sign-hardware-vectors.sh` on a Mac with the devices, which
 makes fresh keys and so new files. Their roots, top-level targets and
@@ -329,6 +354,28 @@ vectors! {
     a_tuf_native_unmet_threshold_is_refused => "tuf-threshold-unmet",
     a_tuf_native_rotation_verifies => "tuf-rotation-verifies",
     a_tuf_native_root_signed_only_by_new_keys_is_refused => "tuf-new-keys-only",
+    a_tuf_ed25519_batch_signature_counts => "s3-batch-ed25519-verifies",
+    an_sshsig_batch_signature_counts => "s3-batch-sshsig-verifies",
+    a_secure_enclave_batch_signature_counts => "s3-batch-software-enclave-verifies",
+    a_fido2_ed25519_batch_signature_counts => "s3-batch-software-fido2-ed25519-verifies",
+    a_fido2_ecdsa_batch_signature_counts => "s3-batch-software-fido2-ecdsa-verifies",
+    a_passkey_batch_signature_counts => "s3-batch-software-passkey-verifies",
+    a_batch_signature_under_the_single_namespace_does_not_count => "s3-batch-under-single-namespace",
+    a_single_signature_under_the_batch_namespace_does_not_count => "s3-single-under-batch-namespace",
+    a_batch_signature_on_an_unlisted_file_does_not_count => "s3-batch-file-not-listed",
+    a_batch_statement_with_another_body_hash_does_not_count => "s3-batch-wrong-body-hash",
+    a_batch_statement_with_another_version_does_not_count => "s3-batch-wrong-version",
+    a_batch_statement_with_another_role_does_not_count => "s3-batch-wrong-role",
+    a_batch_statement_with_another_type_does_not_count => "s3-batch-wrong-type",
+    a_token_batch_signature_without_the_touch_flag_does_not_count => "s4-batch-touch-missing",
+    a_token_batch_signature_with_the_touch_flag_counts => "s4-batch-touch-present",
+    a_release_signed_in_one_batch_verifies => "s6-batch-release-verifies",
+    a_version_only_listing_accepts_another_file_its_role_signed => "s6-version-only-other-file-signed-by-its-role",
+    a_version_only_listing_refuses_another_file_with_the_batch_signature => "s6-version-only-other-file-unsigned",
+    a_real_secure_enclave_batch_signature_counts => "hw-batch-enclave-ecdsa",
+    a_real_fido2_ed25519_batch_signature_counts => "hw-batch-fido2-ed25519",
+    a_real_fido2_ecdsa_batch_signature_counts => "hw-batch-fido2-ecdsa",
+    a_real_passkey_batch_signature_counts => "hw-batch-passkey-webauthn",
 }
 
 #[test]
@@ -342,7 +389,7 @@ fn every_vector_on_disk_has_a_test() {
 }
 ```
 
-Seven claims need more than a role and a rule. §4 asks the refusal to name
+Several claims need more than a role and a rule. §4 asks the refusal to name
 each signatory that signed but did not count, and why. §3 asks it to name a
 signature under another namespace, and a key line that is not in
 `ssh-keygen`'s form is a malformed key, not an invalid signature. §8's
@@ -350,7 +397,9 @@ refusal of a public delegation names the signatory who did not sign. §4's
 touch refusal names the missing flag, and a WebAuthn signature over
 another challenge is named as such. §7
 says the outcome carries the new trusted state, which after a rotation is
-the newest root.
+the newest root. A batch signature that does not count is named for why:
+the namespace it was made under, or what its statement lists instead of
+this file.
 
 <a name="chunk-vector-details"></a><sub>[`tests/conformance/main.rs`](../../crates/x0k-release-metadata/tests/conformance/main.rs) · `#vector-details`</sub>
 
@@ -400,7 +449,7 @@ fn check_under_root(name: &str, edit: impl FnOnce(&mut serde_json::Value)) -> Re
 
 #[test]
 fn a_real_token_signature_does_not_count_where_the_rule_demands_a_flag_it_lacks() {
-    for name in ["hw-fido2-ed25519", "hw-fido2-ecdsa"] {
+    for name in ["hw-fido2-ed25519", "hw-fido2-ecdsa", "hw-batch-fido2-ed25519", "hw-batch-fido2-ecdsa"] {
         let refusal = check_under_root(name, |root| {
             root["signed"]["x-release-metadata-signatories"]["operator"]["flags"] =
                 serde_json::json!(["user-present", "user-verified"]);
@@ -442,6 +491,39 @@ fn the_public_delegation_refusal_names_the_signatory_who_did_not_sign() {
     assert_eq!(missing, ["carol"]);
 }
 
+/// The one fault of `signatory`'s signature in vector `name`'s refusal.
+fn fault_of(name: &str, signatory: &str) -> SignatureFault {
+    let refusal = check(name).expect_err("refused");
+    let verdict = refusal.signatories.iter().find(|v| v.signatory == signatory).expect("signatory named");
+    match verdict.faults.as_slice() {
+        [(_, fault)] => fault.clone(),
+        faults => panic!("{name}: {signatory} has faults {faults:?}"),
+    }
+}
+
+/// Whether a fault is the one a vector expects.
+type FaultCheck<'a> = &'a dyn Fn(&SignatureFault) -> bool;
+
+#[test]
+fn each_batch_refusal_names_why_the_signature_did_not_count() {
+    let unlisted = |fault: &SignatureFault| matches!(fault, SignatureFault::BatchUnlisted { kind, role } if kind == "targets" && role == "fleet");
+    let cases: [(&str, &str, FaultCheck<'_>); 8] = [
+        ("s3-batch-under-single-namespace", "carol", &|f| matches!(f, SignatureFault::Namespace(ns) if ns == "release-metadata")),
+        ("s3-single-under-batch-namespace", "carol", &|f| matches!(f, SignatureFault::Namespace(ns) if ns == "release-metadata-batch")),
+        ("s3-batch-file-not-listed", "carol", &unlisted),
+        ("s3-batch-wrong-body-hash", "carol", &|f| matches!(f, SignatureFault::BatchHash)),
+        ("s3-batch-wrong-version", "carol", &|f| matches!(f, SignatureFault::BatchVersion { listed: 2, offered: 1 })),
+        ("s3-batch-wrong-role", "carol", &unlisted),
+        ("s3-batch-wrong-type", "carol", &unlisted),
+        ("s4-batch-touch-missing", "dave", &|f| matches!(f, SignatureFault::MissingFlag("user-present"))),
+    ];
+    for (name, signatory, expected) in cases {
+        let fault = fault_of(name, signatory);
+        assert!(expected(&fault), "{name}: {fault:?}");
+    }
+    assert!(matches!(fault_of("s6-version-only-other-file-unsigned", "carol"), SignatureFault::BatchHash));
+}
+
 #[test]
 fn the_new_trusted_state_holds_the_rotated_root() {
     let verified = check("s5-rotation").expect("verified");
@@ -474,7 +556,7 @@ use ssh_encoding::Encode;
 use ssh_key::private::Ed25519Keypair;
 use ssh_key::public::KeyData;
 use ssh_key::{HashAlg, PrivateKey, PublicKey};
-use x0k_release_metadata::{canonical_json, key_id, NAMESPACE};
+use x0k_release_metadata::{canonical_json, key_id, BATCH_NAMESPACE, NAMESPACE};
 
 const NOW: &str = "2026-11-05T00:00:00Z";
 const LATER: &str = "2030-01-01T00:00:00Z";
@@ -512,9 +594,9 @@ fn main() {
 ```
 
 A test key is its TUF key object, its id and its signer. An SSH key signs
-under the namespace it is given, which is `release-metadata` unless a
-vector asks for another. A key may name no signatory and no custody, as a
-plain TUF key does.
+one file under `release-metadata` and a batch statement under
+`release-metadata-batch`, unless a vector asks for another namespace. A key
+may name no signatory and no custody, as a plain TUF key does.
 
 <a name="chunk-test-key"></a><sub>[`tests/conformance/main.rs`](../../crates/x0k-release-metadata/tests/conformance/main.rs) · `#test-key` · assembles [hardware-stand-ins](#chunk-hardware-stand-ins)</sub>
 
@@ -529,7 +611,8 @@ struct TestKey {
 #[derive(Clone)]
 enum Signer {
     Ed25519(SigningKey),
-    Sshsig(PrivateKey, &'static str),
+    /// An SSH key, and the namespace a vector makes it sign under instead of the usual one.
+    Sshsig(PrivateKey, Option<&'static str>),
     /// A software stand-in for a hardware signer, with its key's wire encoding.
     Hardware { wire: Vec<u8>, kind: Hardware },
 }
@@ -554,7 +637,7 @@ impl TestKey {
     fn sshsig_line(seed: u8, edit: impl FnOnce(String) -> String) -> Self {
         let pair = Ed25519Keypair::from_seed(&[seed; 32]);
         let line = PublicKey::from(KeyData::Ed25519(pair.public)).to_openssh().expect("key line");
-        let signer = Signer::Sshsig(PrivateKey::from(pair), NAMESPACE);
+        let signer = Signer::Sshsig(PrivateKey::from(pair), None);
         Self::new("ssh-ed25519", "sshsig-ssh-ed25519", edit(line), signer)
     }
 
@@ -573,23 +656,33 @@ impl TestKey {
     fn under_namespace(&self, namespace: &'static str) -> Self {
         let mut key = self.clone();
         if let Signer::Sshsig(_, ns) = &mut key.signer {
-            *ns = namespace;
+            *ns = Some(namespace);
         }
         key
     }
 
-    fn sign(&self, message: &[u8]) -> Value {
-        let sig = match &self.signer {
+    /// The signature over `message`, in hex, under `namespace` unless the key says otherwise.
+    fn sig(&self, namespace: &'static str, message: &[u8]) -> String {
+        match &self.signer {
             Signer::Ed25519(key) => hex::encode(key.sign(message).to_bytes()),
-            Signer::Sshsig(key, namespace) => {
-                let envelope = key.sign(namespace, HashAlg::Sha512, message).expect("sshsig");
+            Signer::Sshsig(key, instead) => {
+                let envelope = key.sign(instead.unwrap_or(namespace), HashAlg::Sha512, message).expect("sshsig");
                 let mut blob = Vec::new();
                 envelope.encode(&mut blob).expect("sshsig encoding");
                 hex::encode(blob)
             }
-            Signer::Hardware { wire, kind } => hex::encode(kind.sshsig(wire, message)),
-        };
-        json!({ "keyid": self.id, "sig": sig })
+            Signer::Hardware { wire, kind } => hex::encode(kind.sshsig(wire, namespace, message)),
+        }
+    }
+
+    fn sign(&self, message: &[u8]) -> Value {
+        json!({ "keyid": self.id, "sig": self.sig(NAMESPACE, message) })
+    }
+
+    /// A batch signature entry over `statement`, which it carries.
+    fn sign_batch(&self, statement: &Value) -> Value {
+        let message = canonical_json(statement).expect("canonical statement");
+        json!({ "keyid": self.id, "sig": self.sig(BATCH_NAMESPACE, &message), "x-release-metadata-batch": statement })
     }
 }
 
@@ -670,10 +763,11 @@ impl TestKey {
 }
 
 impl Hardware {
-    /// The SSHSIG envelope this signer writes over `message`, for the key `public`.
-    fn sshsig(&self, public: &[u8], message: &[u8]) -> Vec<u8> {
+    /// The SSHSIG envelope this signer writes over `message` under
+    /// `namespace`, for the key `public`.
+    fn sshsig(&self, public: &[u8], namespace: &str, message: &[u8]) -> Vec<u8> {
         let mut signed = b"SSHSIG".to_vec();
-        signed.extend(ssh_wire(&[NAMESPACE.as_bytes(), b"", b"sha512", &Sha512::digest(message)]));
+        signed.extend(ssh_wire(&[namespace.as_bytes(), b"", b"sha512", &Sha512::digest(message)]));
         let token_data = |flags: u8| sk_data(TOKEN_APPLICATION, flags, &Sha256::digest(&signed));
         let blob = match self {
             Hardware::Enclave(key) => ssh_wire(&[b"ecdsa-sha2-nistp256", &p256_signature(key, &signed)]),
@@ -698,7 +792,7 @@ impl Hardware {
         };
         let mut envelope = b"SSHSIG".to_vec();
         envelope.extend(1u32.to_be_bytes());
-        envelope.extend(ssh_wire(&[public, NAMESPACE.as_bytes(), b"", b"sha512", &blob]));
+        envelope.extend(ssh_wire(&[public, namespace.as_bytes(), b"", b"sha512", &blob]));
         envelope
     }
 }
@@ -894,6 +988,44 @@ fn meta(version: u64, bytes: &[u8]) -> Value {
 }
 ```
 
+A batch signature is written as the decision describes it, from the
+bodies, without the crate's ceremony: the statement lists each file's
+type, role, version and the SHA-256 of its canonical body, and every
+covered file carries the one signature with the statement beside it. A
+vector may change the statement before it is signed, so that the
+signature verifies and the statement is what is wrong.
+
+<a name="chunk-bodies-2"></a><sub>[`tests/conformance/main.rs`](../../crates/x0k-release-metadata/tests/conformance/main.rs) · `#bodies` · continues</sub>
+
+```rust {#bodies}
+
+fn batch_listing(role: &str, body: &Value) -> Value {
+    let sha256 = hex::encode(Sha256::digest(canonical_json(body).expect("canonical body")));
+    json!({ "_type": body["_type"], "role": role, "version": body["version"], "hashes": { "sha256": sha256 } })
+}
+
+/// `files`, each a role and its body, signed by `key` with one batch
+/// signature over a statement that `edit` may change first.
+fn batch_signed(files: &[(&str, Value)], key: &TestKey, edit: impl FnOnce(&mut Value)) -> Vec<Value> {
+    let listings: Vec<Value> = files.iter().map(|(role, body)| batch_listing(role, body)).collect();
+    let mut statement = json!({ "_type": "release-metadata-batch", "files": listings });
+    edit(&mut statement);
+    let signature = key.sign_batch(&statement);
+    files.iter().map(|(_, body)| json!({ "signed": body, "signatures": [signature] })).collect()
+}
+
+/// A trusted root whose snapshot and timestamp roles are `key`, a releaser,
+/// so `key` signs a release in one batch (decision §6).
+fn root_releasing(cast: &Cast, key: &TestKey) -> Value {
+    let root_keys = [&cast.root[0], &cast.root[1]];
+    let mut body = root_body(cast, 1, &root_keys, json!({}));
+    for role in ["snapshot", "timestamp"] {
+        body["roles"][role] = json!({ "keyids": [key.id], "threshold": 1 });
+    }
+    signed(body, &root_keys)
+}
+```
+
 A vector starts from a baseline repository that verifies, and changes one
 thing. The baseline: root version 1 with two root keys, a top-level
 targets role that delegates both audiences at a threshold of one, and a
@@ -914,6 +1046,21 @@ struct Parts {
     timestamp_version: u64,
     timestamp_expires: &'static str,
     path: &'static str,
+    /// The key that signs `fleet`, the snapshot and the timestamp in one
+    /// batch, when the vector is a release made in one step.
+    release_by: Option<TestKey>,
+    /// What a release vector puts on disk as `fleet.json`.
+    fleet_on_disk: OnDisk,
+}
+
+/// The `fleet.json` a release vector writes.
+enum OnDisk {
+    /// The file the batch signed.
+    Signed,
+    /// Another body of the same version, carrying the batch's signature.
+    BodyWithBatchSignature(Value),
+    /// Another whole file.
+    File(Value),
 }
 
 impl Parts {
@@ -930,6 +1077,8 @@ impl Parts {
             timestamp_version: 1,
             timestamp_expires: LATER,
             path: FLEET_PATH,
+            release_by: None,
+            fleet_on_disk: OnDisk::Signed,
         }
     }
 }
@@ -953,7 +1102,9 @@ fn refused(role: &str, rule: &str) -> Value {
 
 Writing a vector computes the snapshot over the targets files as written,
 and the timestamp over the snapshot, so the listings always match the
-bytes on disk.
+bytes on disk. A release vector instead signs `fleet`, the snapshot and
+the timestamp in one batch, so the snapshot lists `fleet` and the
+timestamp lists the snapshot by version only (decision §6).
 
 <a name="chunk-write-vector"></a><sub>[`tests/conformance/main.rs`](../../crates/x0k-release-metadata/tests/conformance/main.rs) · `#write-vector`</sub>
 
@@ -986,6 +1137,10 @@ fn write(out: &Path, cast: &Cast, vector: Vector) {
     let mut snapshot_meta = Map::new();
     let named = [("targets", &parts.targets), ("fleet", &parts.fleet), ("pilot", &parts.pilot)];
     for (role, file) in named.into_iter().chain(parts.extra.iter().map(|(role, file)| (*role, file))) {
+        if parts.release_by.is_some() && role == "fleet" {
+            snapshot_meta.insert("fleet.json".to_owned(), json!({ "version": file["signed"]["version"] }));
+            continue;
+        }
         put(&format!("fetched/{role}.json"), file);
         snapshot_meta.insert(format!("{role}.json"), meta(1, &bytes(file)));
     }
@@ -993,9 +1148,31 @@ fn write(out: &Path, cast: &Cast, vector: Vector) {
         "_type": "snapshot", "spec_version": "1.0.37", "version": 1, "expires": LATER,
         "meta": snapshot_meta,
     });
-    let snapshot = bytes(&signed(snapshot_body, &[&cast.online]));
+    let snapshot = match &parts.release_by {
+        None => {
+            let snapshot = bytes(&signed(snapshot_body, &[&cast.online]));
+            put("fetched/timestamp.json", &timestamp(cast, parts.timestamp_version, parts.timestamp_expires, &snapshot));
+            snapshot
+        }
+        Some(key) => {
+            let timestamp_body = json!({
+                "_type": "timestamp", "spec_version": "1.0.37", "version": parts.timestamp_version,
+                "expires": parts.timestamp_expires, "meta": { "snapshot.json": { "version": 1 } },
+            });
+            let fleet = parts.fleet["signed"].clone();
+            let files = [("fleet", fleet), ("snapshot", snapshot_body), ("timestamp", timestamp_body)];
+            let [fleet, snapshot, timestamp] = <[Value; 3]>::try_from(batch_signed(&files, key, |_| {})).expect("three files");
+            let fleet = match parts.fleet_on_disk {
+                OnDisk::Signed => fleet,
+                OnDisk::BodyWithBatchSignature(body) => json!({ "signed": body, "signatures": fleet["signatures"] }),
+                OnDisk::File(file) => file,
+            };
+            put("fetched/fleet.json", &fleet);
+            put("fetched/timestamp.json", &timestamp);
+            bytes(&snapshot)
+        }
+    };
     fs::write(dir.join("fetched/snapshot.json"), &snapshot).expect("write snapshot");
-    put("fetched/timestamp.json", &timestamp(cast, parts.timestamp_version, parts.timestamp_expires, &snapshot));
     if let Some(version) = parts.trusted_timestamp_version {
         put("trusted/timestamp.json", &timestamp(cast, version, LATER, &snapshot));
     }
@@ -1062,6 +1239,25 @@ fn vectors(c: &Cast) -> Vec<Vector> {
         ..Parts::base(c)
     };
     let root_with = |extra: &[&TestKey]| signed(root_body_listing(c, 1, &[&r[0], &r[1]], extra, json!({})), &[&r[0], &r[1]]);
+    let heidi = TestKey::ed25519(60, "heidi", "software");
+    let both_by = |key: &TestKey, edit: &dyn Fn(&mut Value)| {
+        let files = [("fleet", audience(&[FLEET_PATH])), ("pilot", audience(&[]))];
+        let mut signed = batch_signed(&files, key, |statement| edit(statement)).into_iter();
+        (signed.next().expect("fleet"), signed.next().expect("pilot"))
+    };
+    let batch_parts = |key: &TestKey, edit: &dyn Fn(&mut Value)| {
+        let (fleet, pilot) = both_by(key, edit);
+        Parts { targets: listing_only(key), fleet, pilot, ..Parts::base(c) }
+    };
+    let as_is = |_: &mut Value| {};
+    let fleet_entry = |change: fn(&mut Value)| move |statement: &mut Value| change(&mut statement["files"][0]);
+    let other_fleet_body = || audience(&[FLEET_PATH, OTHER_VERSION_PATH]);
+    let release_parts = |on_disk: OnDisk| Parts {
+        trusted_root: root_releasing(c, &c.carol),
+        release_by: Some(c.carol.clone()),
+        fleet_on_disk: on_disk,
+        ..Parts::base(c)
+    };
     vec![
         Vector {
             name: "s1-baseline-verifies", decision: "§1",
@@ -1298,7 +1494,7 @@ fn vectors(c: &Cast) -> Vec<Vector> {
             claim: "The same token's signature with the touch flag counts (software-made).",
             expect: verified("fleet"),
             parts: Parts {
-                trusted_root: root_ruling(dave_needs_touch),
+                trusted_root: root_ruling(dave_needs_touch.clone()),
                 targets: listing_only(&dave_touched),
                 fleet: fleet_by(&[&dave_touched]),
                 ..Parts::base(c)
@@ -1433,6 +1629,109 @@ fn vectors(c: &Cast) -> Vec<Vector> {
                 ..tuf_base()
             },
         },
+        Vector {
+            name: "s3-batch-ed25519-verifies", decision: "§3",
+            claim: "One TUF ed25519 signature over a batch statement that lists fleet and pilot counts on fleet.",
+            expect: verified("fleet"), parts: batch_parts(&heidi, &as_is),
+        },
+        Vector {
+            name: "s3-batch-sshsig-verifies", decision: "§3",
+            claim: "One SSHSIG signature under release-metadata-batch over a statement that lists fleet and pilot counts on fleet.",
+            expect: verified("fleet"), parts: batch_parts(&c.carol, &as_is),
+        },
+        Vector {
+            name: "s3-batch-software-enclave-verifies", decision: "§3",
+            claim: "A P-256 SSHSIG batch signature, the kind a Secure Enclave key makes, counts on each file its statement lists (software-made).",
+            expect: verified("fleet"), parts: batch_parts(&frank, &as_is),
+        },
+        Vector {
+            name: "s3-batch-software-fido2-ed25519-verifies", decision: "§3",
+            claim: "An sk-ssh-ed25519 batch signature over the U2F blob of the statement counts (software-made).",
+            expect: verified("fleet"), parts: batch_parts(&dave_touched, &as_is),
+        },
+        Vector {
+            name: "s3-batch-software-fido2-ecdsa-verifies", decision: "§3",
+            claim: "An sk-ecdsa-sha2-nistp256 batch signature over the U2F blob of the statement counts (software-made).",
+            expect: verified("fleet"), parts: batch_parts(&erin, &as_is),
+        },
+        Vector {
+            name: "s3-batch-software-passkey-verifies", decision: "§3",
+            claim: "A WebAuthn batch signature, whose client data carries the statement's SSHSIG blob as its challenge, counts (software-made).",
+            expect: verified("fleet"), parts: batch_parts(&grace, &as_is),
+        },
+        Vector {
+            name: "s3-batch-under-single-namespace", decision: "§3",
+            claim: "A batch signature made under the namespace release-metadata does not count.",
+            expect: refused("fleet", "threshold"),
+            parts: batch_parts(&c.carol.under_namespace(NAMESPACE), &as_is),
+        },
+        Vector {
+            name: "s3-single-under-batch-namespace", decision: "§3",
+            claim: "A signature over one file made under the namespace release-metadata-batch does not count.",
+            expect: refused("fleet", "threshold"),
+            parts: Parts { fleet: fleet_by(&[&c.carol.under_namespace(BATCH_NAMESPACE)]), ..Parts::base(c) },
+        },
+        Vector {
+            name: "s3-batch-file-not-listed", decision: "§3",
+            claim: "A batch signature on a file its statement does not list does not count.",
+            expect: refused("fleet", "threshold"),
+            parts: batch_parts(&c.carol, &|statement: &mut Value| {
+                statement["files"].as_array_mut().expect("files").remove(0);
+            }),
+        },
+        Vector {
+            name: "s3-batch-wrong-body-hash", decision: "§3",
+            claim: "A batch signature whose statement lists another hash of the file's body does not count.",
+            expect: refused("fleet", "threshold"),
+            parts: batch_parts(&c.carol, &fleet_entry(|entry| entry["hashes"]["sha256"] = json!("00".repeat(32)))),
+        },
+        Vector {
+            name: "s3-batch-wrong-version", decision: "§3",
+            claim: "A batch signature whose statement lists another version of the file does not count.",
+            expect: refused("fleet", "threshold"),
+            parts: batch_parts(&c.carol, &fleet_entry(|entry| entry["version"] = json!(2))),
+        },
+        Vector {
+            name: "s3-batch-wrong-role", decision: "§3",
+            claim: "A batch signature whose statement lists the file's body under another role does not count.",
+            expect: refused("fleet", "threshold"),
+            parts: batch_parts(&c.carol, &fleet_entry(|entry| entry["role"] = json!("stable"))),
+        },
+        Vector {
+            name: "s3-batch-wrong-type", decision: "§3",
+            claim: "A batch signature whose statement lists the file's body under another type does not count.",
+            expect: refused("fleet", "threshold"),
+            parts: batch_parts(&c.carol, &fleet_entry(|entry| entry["_type"] = json!("snapshot"))),
+        },
+        Vector {
+            name: "s4-batch-touch-missing", decision: "§4",
+            claim: "A token's batch signature without the touch flag does not count for a signatory whose rule demands one (software-made).",
+            expect: refused("fleet", "threshold"),
+            parts: Parts { trusted_root: root_ruling(dave_needs_touch.clone()), ..batch_parts(&dave_untouched, &as_is) },
+        },
+        Vector {
+            name: "s4-batch-touch-present", decision: "§4",
+            claim: "The same token's batch signature with the touch flag counts on each file (software-made).",
+            expect: verified("fleet"),
+            parts: Parts { trusted_root: root_ruling(dave_needs_touch.clone()), ..batch_parts(&dave_touched, &as_is) },
+        },
+        Vector {
+            name: "s6-batch-release-verifies", decision: "§6",
+            claim: "A release whose fleet file, snapshot and timestamp one key signs in one batch verifies; the snapshot lists fleet and the timestamp lists the snapshot by version only.",
+            expect: verified("fleet"), parts: release_parts(OnDisk::Signed),
+        },
+        Vector {
+            name: "s6-version-only-other-file-signed-by-its-role", decision: "§6",
+            claim: "Under a snapshot that lists fleet by version only, another fleet file of that version verifies when the fleet role's signatories signed it.",
+            expect: verified("fleet"),
+            parts: release_parts(OnDisk::File(signed(other_fleet_body(), &[&c.alice_laptop]))),
+        },
+        Vector {
+            name: "s6-version-only-other-file-unsigned", decision: "§6",
+            claim: "Another fleet file of that version that carries only the release's batch signature is refused: the statement names the signed body's hash.",
+            expect: refused("fleet", "threshold"),
+            parts: release_parts(OnDisk::BodyWithBatchSignature(other_fleet_body())),
+        },
     ]
 }
 ```
@@ -1440,9 +1739,10 @@ fn vectors(c: &Cast) -> Vec<Vector> {
 The vectors pin the outcomes a reader relies on: which update verifies and
 which is refused, by which role and rule. They do not pin the wording of a
 refusal or the order of verdicts, which may change freely. What they leave
-open is the hardware half of §3 and §4. A vector whose envelope a FIDO2
-token made, and one whose touch flag is missing, need the operator's token
-to sign them once.
+open is a batch signature made by a real FIDO2 token or a real passkey:
+the kit's `batch-fido2-ed25519`, `batch-fido2-ecdsa` and `batch-passkey`
+schemes make those vectors, and each needs the operator's device and touch.
+The software-made batch vectors cover the same structures meanwhile.
 
 ## Stock TUF clients
 

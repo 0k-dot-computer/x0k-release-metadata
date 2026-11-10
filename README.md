@@ -26,7 +26,7 @@ read it the same way.
 
 ```toml
 [dependencies]
-x0k-release-metadata = "0.2"
+x0k-release-metadata = "0.3"
 ```
 
 ```rust
@@ -78,8 +78,28 @@ x0k-release-metadata status 2.root.json --trusted 1.root.json
 ```
 
 A first root, version 1, is signed the same way, without `--trusted`.
-The build server signs the snapshot and the timestamp with its one online
-key, and a scheduled job refreshes the timestamp with one command:
+`sign` takes several staged files and signs them with one signature, so a
+security key is touched once, for example a new root and the targets file
+under it:
+
+```sh
+x0k-release-metadata sign 2.root.json targets.json --trusted 1.root.json --key ~/.ssh/id_ed25519_sk
+```
+
+A maintainer whose key the root also lists for the snapshot and the
+timestamp releases with one touch. `release` signs the audience's targets
+file, writes the snapshot and the timestamp, and signs all three together:
+
+```sh
+x0k-release-metadata release stable.json --trusted root.json --delegator targets.json \
+    --targets targets.json --snapshot snapshot.json --timestamp timestamp.json \
+    --snapshot-expires-in 7d --timestamp-expires-in 1d --key ~/.ssh/id_ed25519_sk \
+    --rebuilt stable/app-1.0-aarch64-darwin.tar=target/app-1.0-aarch64-darwin.tar
+```
+
+From Rust, `sign_release` does the same in one call. The build server
+signs the snapshot and the timestamp with its one online key, and a
+scheduled job refreshes the timestamp with one command:
 
 ```sh
 x0k-release-metadata timestamp timestamp.json --trusted root.json --snapshot snapshot.json \
@@ -104,11 +124,13 @@ not reproducible.
 | `sshsig-sk-ecdsa-sha2-nistp256` | A FIDO2 security key, or a passkey through WebAuthn |
 
 Every scheme is verified in the process, by this crate. Nothing runs
-`ssh-keygen` to verify.
+`ssh-keygen` to verify. Every scheme can also make a batch signature: one
+signature over a statement that lists several files by type, role,
+version and hash, which counts on each file it lists.
 
 ## What it promises
 
-This is release 0.2. What you may rely on is written down in
+This is release 0.3. What you may rely on is written down in
 [the release-metadata decision](decisions/architecture/delivery/release-metadata.md):
 the record formats, the rules a reader checks, and what each refusal means.
 What it does not protect against, and what it assumes, is in
@@ -136,7 +158,7 @@ the code and generate it. Change the chapter, not the generated file.
 
 The metadata types, the schemes, counting signatories, and the client workflow.
 
-- [x0k-release-metadata: verifying a release against its maintainers](implementation/release-metadata/release-metadata.md) — The TUF metadata types with signatory, custody and presence-flag fields, TUF's ed25519 scheme and the four SSHSIG schemes (an SSH key, a Secure Enclave key, a FIDO2 token, a passkey through WebAuthn), and a pure verifier that walks TUF's client workflow and counts signatories, not keys.
+- [x0k-release-metadata: verifying a release against its maintainers](implementation/release-metadata/release-metadata.md) — The TUF metadata types with signatory, custody and presence-flag fields, TUF's ed25519 scheme and the four SSHSIG schemes (an SSH key, a Secure Enclave key, a FIDO2 token, a passkey through WebAuthn), batch signatures that count on every file their statement lists, and a pure verifier that walks TUF's client workflow and counts signatories, not keys.
 
 ### The conformance vectors
 
@@ -148,13 +170,13 @@ Each claim of the decision as a signed repository on disk, and the generator tha
 
 The stage, sign and status commands, the signer program, and the rebuild check.
 
-- [The signing ceremony of x0k-release-metadata](implementation/release-metadata/ceremony.md) — The stage, sign and status commands of the release-metadata ceremony: a root or targets file is staged once, each signatory signs it on their own machine through a signer program with ssh-keygen's interface, the status names who is missing, and a targets entry is signed only when it matches the signer's own rebuild.
+- [The signing ceremony of x0k-release-metadata](implementation/release-metadata/ceremony.md) — The stage, sign and status commands of the release-metadata ceremony: a root or targets file is staged once, each signatory signs it on their own machine through a signer program with ssh-keygen's interface, several files at once with one batch signature, the status names who is missing, a targets entry is signed only when it matches the signer's own rebuild, and a release's targets file, snapshot and timestamp take one signature.
 
 ### The hardware signing kit
 
 How the vectors signed by real devices are made.
 
-- [The hardware signing kit of x0k-release-metadata](implementation/release-metadata/hardware-kit.md) — The kit an operator runs once on a Mac to make one conformance vector per hardware scheme, signed by the real signer: fresh FIDO2 keys through ssh-keygen, a fresh Secure Enclave key through Secretive, and a passkey through a local WebAuthn page, each signed through the crate's own ceremony.
+- [The hardware signing kit of x0k-release-metadata](implementation/release-metadata/hardware-kit.md) — The kit an operator runs once on a Mac to make one conformance vector per hardware scheme, signed by the real signer: fresh FIDO2 keys through ssh-keygen, a fresh Secure Enclave key through Secretive, and a passkey through a local WebAuthn page, each signed through the crate's own ceremony, one file at a time or two files with one batch signature.
 
 ## Where it comes from
 

@@ -1,0 +1,83 @@
+{
+  "signed": {
+    "_type": "root",
+    "spec_version": "1.0.37",
+    "consistent_snapshot": false,
+    "version": 1,
+    "expires": "2030-01-01T00:00:00Z",
+    "keys": {
+      "7ab6b86cb2c9684b0ddc10896153aa2595decf4d4327a5ff1a8ab7422c828b12": {
+        "keytype": "ed25519",
+        "scheme": "ed25519",
+        "keyval": {
+          "public": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c"
+        }
+      },
+      "c3f860ca5da4454d33496ca33bb48f0cdcd5b731be7316b67ca191db0185aa26": {
+        "keytype": "ed25519",
+        "scheme": "ed25519",
+        "keyval": {
+          "public": "8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394"
+        }
+      },
+      "beb99376effe9939ecdd3f06e45ab4236afcf876159e5b3463e5a0cd85c3d271": {
+        "keytype": "ed25519",
+        "scheme": "ed25519",
+        "keyval": {
+          "public": "20828bf5c5bdcacb684863336c202fb5599da48be5596615742170705beca9f7"
+        }
+      },
+      "f31590440173d67899d4ae4984b8ec90fce42e30f9e7fb2cd9378bf22ec55671": {
+        "keytype": "ed25519",
+        "scheme": "ed25519",
+        "keyval": {
+          "public": "43a72e714401762df66b68c26dfbdf2682aaec9f2474eca4613e424a0fbafd3c"
+        }
+      }
+    },
+    "roles": {
+      "root": {
+        "keyids": [
+          "7ab6b86cb2c9684b0ddc10896153aa2595decf4d4327a5ff1a8ab7422c828b12",
+          "c3f860ca5da4454d33496ca33bb48f0cdcd5b731be7316b67ca191db0185aa26"
+        ],
+        "threshold": 2
+      },
+      "timestamp": {
+        "keyids": [
+          "f31590440173d67899d4ae4984b8ec90fce42e30f9e7fb2cd9378bf22ec55671"
+        ],
+        "threshold": 1
+      },
+      "snapshot": {
+        "keyids": [
+          "f31590440173d67899d4ae4984b8ec90fce42e30f9e7fb2cd9378bf22ec55671"
+        ],
+        "threshold": 1
+      },
+      "targets": {
+        "keyids": [
+          "beb99376effe9939ecdd3f06e45ab4236afcf876159e5b3463e5a0cd85c3d271"
+        ],
+        "threshold": 1
+      }
+    },
+    "x-release-metadata-signatories": {
+      "operator": {
+        "flags": [
+          "user-present"
+        ]
+      }
+    }
+  },
+  "signatures": [
+    {
+      "keyid": "7ab6b86cb2c9684b0ddc10896153aa2595decf4d4327a5ff1a8ab7422c828b12",
+      "sig": "b0eed3705f9705080fecdccec687d4451d7994141312cf9f8b22ccd8564df487a28ebaacd3f413a08bb1cf1e194833d6551b81a359b15fda64f6e1a2ab7edb0f"
+    },
+    {
+      "keyid": "c3f860ca5da4454d33496ca33bb48f0cdcd5b731be7316b67ca191db0185aa26",
+      "sig": "9b09ad9da59dac23dbf2b072e2e34ef5ba27302c28eb9a319d8c08d99ae70eaacd4ce5ede19d43a46f3b6f66d61c14f7eb2158bbca358ac890123750ccf74c0e"
+    }
+  ]
+}

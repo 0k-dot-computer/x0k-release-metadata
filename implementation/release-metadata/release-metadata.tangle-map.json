@@ -1,6 +1,6 @@
 {
   "source": "implementation/release-metadata/release-metadata.md",
-  "source_hash": "2e3c4b1c4c3770fb",
+  "source_hash": "fecc9062e4c1d222",
   "pipelines": [
     {
       "kind": "identity-tangle",
@@ -9,19 +9,19 @@
       "outputs": [
         {
           "path": "crates/x0k-release-metadata/src/lib.rs",
-          "hash": "609362a539378853"
+          "hash": "13cab205ac5fa7f8"
         },
         {
           "path": "crates/x0k-release-metadata/src/refusal.rs",
-          "hash": "adad13baed0de541"
+          "hash": "d95eec9be73800bd"
         },
         {
           "path": "crates/x0k-release-metadata/src/canonical.rs",
-          "hash": "06dc387f7bb364b6"
+          "hash": "3d7299d0ff99ca55"
         },
         {
           "path": "crates/x0k-release-metadata/src/metadata.rs",
-          "hash": "f0f1feb7f79ca07a"
+          "hash": "c467f552a05508f5"
         },
         {
           "path": "crates/x0k-release-metadata/src/time.rs",
@@ -29,23 +29,27 @@
         },
         {
           "path": "crates/x0k-release-metadata/src/scheme.rs",
-          "hash": "2c78bec94cded13a"
+          "hash": "6ca8ec367a62d1d2"
+        },
+        {
+          "path": "crates/x0k-release-metadata/src/batch.rs",
+          "hash": "38828f5a3249d384"
         },
         {
           "path": "crates/x0k-release-metadata/src/quorum.rs",
-          "hash": "190d756f1ab9cd6d"
+          "hash": "b49a35d69b7683e0"
         },
         {
           "path": "crates/x0k-release-metadata/src/verify.rs",
-          "hash": "92f97f44a25fe848"
+          "hash": "0745674b523642ca"
         },
         {
           "path": "crates/x0k-release-metadata/Cargo.toml",
-          "hash": "ff2eaf69dd86c7ce"
+          "hash": "9ff1398757ff04a1"
         },
         {
           "path": "crates/x0k-release-metadata/tests/conformance/purity.rs",
-          "hash": "d6e4ec2502d72fed"
+          "hash": "ee94da2cba9e751c"
         }
       ]
     }

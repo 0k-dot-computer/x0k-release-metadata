@@ -1,6 +1,6 @@
 {
   "source": "implementation/release-metadata/vectors.md",
-  "source_hash": "1c90405f733dc92b",
+  "source_hash": "457c475fc6c26569",
   "pipelines": [
     {
       "kind": "identity-tangle",
@@ -13,11 +13,11 @@
         },
         {
           "path": "crates/x0k-release-metadata/tests/conformance/vectors.rs",
-          "hash": "be6e616c18d6ddc1"
+          "hash": "aa3294a36dc56288"
         },
         {
           "path": "crates/x0k-release-metadata/examples/make_vectors.rs",
-          "hash": "6c583dc3b9c42aa1"
+          "hash": "6448e7b523cbc01c"
         },
         {
           "path": "crates/x0k-release-metadata/interop/tuf_client_verdicts.py",

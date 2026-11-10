@@ -4,6 +4,7 @@
 //!
 //! Run by kit/sign-hardware-vectors.sh; see the hardware-kit chapter.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
@@ -74,7 +75,15 @@ fn kit_cast() -> Cast {
     Cast { root: [SoftKey::new(1), SoftKey::new(2)], targets: SoftKey::new(20), online: SoftKey::new(10) }
 }
 
-fn prepare_vector(dir: &Path, public: &str, custody: &str, touch: bool) -> Result<(), KitError> {
+/// What a hardware vector proves besides the scheme: the touch rule, and
+/// one batch signature over two files.
+struct Shape {
+    touch: bool,
+    batch: bool,
+}
+
+fn prepare_vector(dir: &Path, public: &str, custody: &str, shape: Shape) -> Result<(), KitError> {
+    let Shape { touch, batch } = shape;
     let line = String::from_utf8_lossy(&read_kit_file(Path::new(public))?).trim().to_owned();
     let (hardware_id, hardware) = hardware_key(&line, custody)?;
     let c = kit_cast();
@@ -95,12 +104,13 @@ fn prepare_vector(dir: &Path, public: &str, custody: &str, touch: bool) -> Resul
         "x-release-metadata-signatories": rules,
     });
     let hardware_listing: Map<String, Value> = [(hardware_id.clone(), hardware)].into_iter().collect();
+    let audience = |name: &str| {
+        json!({ "name": name, "keyids": [hardware_id], "threshold": 1, "terminating": true, "paths": [format!("{name}/*")] })
+    };
+    let roles = if batch { vec![audience("fleet"), audience("pilot")] } else { vec![audience("fleet")] };
     let targets = json!({
         "_type": "targets", "spec_version": "1.0.37", "version": 1, "expires": LATER, "targets": {},
-        "delegations": {
-            "keys": hardware_listing,
-            "roles": [{ "name": "fleet", "keyids": [hardware_id], "threshold": 1, "terminating": true, "paths": ["fleet/*"] }],
-        },
+        "delegations": { "keys": hardware_listing, "roles": roles },
     });
     let entry = json!({
         "length": ARTIFACT.len(),
@@ -113,6 +123,10 @@ fn prepare_vector(dir: &Path, public: &str, custody: &str, touch: bool) -> Resul
     write_kit_file(&dir.join("trusted/root.json"), &pretty_json(&signed(root, &[&c.root[0], &c.root[1]])))?;
     write_kit_file(&dir.join("fetched/targets.json"), &pretty_json(&signed(targets, &[&c.targets])))?;
     write_kit_file(&dir.join("fleet.body.json"), &pretty_json(&fleet))?;
+    if batch {
+        let pilot = json!({ "_type": "targets", "spec_version": "1.0.37", "version": 1, "expires": LATER, "targets": {} });
+        write_kit_file(&dir.join("pilot.body.json"), &pretty_json(&pilot))?;
+    }
     write_kit_file(&dir.join("artifact.tar"), ARTIFACT)
 }
 
@@ -122,11 +136,16 @@ fn kit_meta(bytes: &[u8]) -> Value {
 
 fn finish_vector(dir: &Path, claim: &str) -> Result<(), KitError> {
     let c = kit_cast();
-    let targets = read_kit_file(&dir.join("fetched/targets.json"))?;
-    let fleet = read_kit_file(&dir.join("fetched/fleet.json"))?;
+    let mut files = BTreeMap::new();
+    for role in ["targets", "fleet", "pilot"] {
+        let path = dir.join(format!("fetched/{role}.json"));
+        if role != "pilot" || path.exists() {
+            files.insert(role.to_owned(), read_kit_file(&path)?);
+        }
+    }
+    let meta: Map<String, Value> = files.iter().map(|(role, bytes)| (format!("{role}.json"), kit_meta(bytes))).collect();
     let snapshot = json!({
-        "_type": "snapshot", "spec_version": "1.0.37", "version": 1, "expires": LATER,
-        "meta": { "targets.json": kit_meta(&targets), "fleet.json": kit_meta(&fleet) },
+        "_type": "snapshot", "spec_version": "1.0.37", "version": 1, "expires": LATER, "meta": meta,
     });
     let snapshot = pretty_json(&signed(snapshot, &[&c.online]));
     let timestamp = json!({
@@ -145,18 +164,13 @@ fn finish_vector(dir: &Path, claim: &str) -> Result<(), KitError> {
         "expect": { "verified": { "role": "fleet" } },
     });
     write_kit_file(&dir.join("case.json"), &pretty_json(&case))?;
-    let fetched = Fetched {
-        roots: Vec::new(),
-        timestamp,
-        snapshot,
-        targets: [("targets".to_owned(), targets), ("fleet".to_owned(), fleet)].into(),
-    };
+    let fetched = Fetched { roots: Vec::new(), timestamp, snapshot, targets: files };
     let trusted = TrustedState::from_root(read_kit_file(&dir.join("trusted/root.json"))?);
     let artifact = Artifact { length: ARTIFACT.len() as u64, hashes: [("sha256".to_owned(), sha256)].into() };
     let now = parse_utc(NOW).map_err(|e| KitError::Refused(e.to_string()))?;
     let verified = verify(&trusted, &fetched, PATH, &artifact, now)
         .map_err(|refusal| KitError::Refused(format!("the vector does not verify: {refusal}")))?;
-    for leftover in ["fleet.body.json", "artifact.tar"] {
+    for leftover in ["fleet.body.json", "pilot.body.json", "artifact.tar"] {
         let _ = fs::remove_file(dir.join(leftover));
     }
     let _ = writeln!(std::io::stdout(), "{}: verified by role {}", dir.display(), verified.target.role);
@@ -218,18 +232,24 @@ fn kit_refusal(why: &str) -> KitError {
     KitError::Refused(why.to_owned())
 }
 
-fn webauthn_sign(namespace: &str, assertion: &Path) -> Result<(), KitError> {
-    let assertion: Assertion = serde_json::from_slice(&read_kit_file(assertion)?)?;
+fn webauthn_sign(namespace: &str, assertion_path: &Path) -> Result<(), KitError> {
     let mut message = Vec::new();
     std::io::stdin()
         .read_to_end(&mut message)
         .map_err(|source| KitError::File { path: PathBuf::from("<stdin>"), source })?;
+    let blob = sshsig_blob(namespace, &message);
+    if !fs::metadata(assertion_path).is_ok_and(|meta| meta.len() > 0) {
+        let challenge = Base64UrlUnpadded::encode_string(&blob);
+        let _ = writeln!(std::io::stderr(), "challenge: {challenge}");
+        let wanted = assertion_path.display();
+        return Err(KitError::Refused(format!("no assertion yet: sign the challenge on the passkey page, save it as {wanted}, and sign again")));
+    }
+    let assertion: Assertion = serde_json::from_slice(&read_kit_file(assertion_path)?)?;
     let decode = |text: &str| Base64UrlUnpadded::decode_vec(text.trim_end_matches('=')).map_err(|_| kit_refusal("bad base64url"));
     let authenticator_data = decode(&assertion.authenticator_data)?;
     let client_data = decode(&assertion.client_data_json)?;
     let der = decode(&assertion.signature)?;
     let parsed: ClientData = serde_json::from_slice(&client_data)?;
-    let blob = sshsig_blob(namespace, &message);
     if decode(&parsed.challenge)? != blob {
         return Err(kit_refusal("the passkey signed another challenge than this staged file's"));
     }
@@ -308,8 +328,10 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let words: Vec<&str> = args.iter().map(String::as_str).collect();
     let outcome = match words.as_slice() {
-        ["prepare", dir, public, custody] => prepare_vector(Path::new(dir), public, custody, false),
-        ["prepare", dir, public, custody, "--touch"] => prepare_vector(Path::new(dir), public, custody, true),
+        ["prepare", dir, public, custody, flags @ ..] if flags.iter().all(|f| ["--touch", "--batch"].contains(f)) => {
+            let shape = Shape { touch: flags.contains(&"--touch"), batch: flags.contains(&"--batch") };
+            prepare_vector(Path::new(dir), public, custody, shape)
+        }
         ["challenge", staged] => print_challenge(Path::new(staged)),
         ["check-assertion", assertion] => check_assertion(Path::new(assertion)),
         ["finish", dir, claim] => finish_vector(Path::new(dir), claim),
@@ -324,7 +346,7 @@ fn main() {
 
 #[derive(Debug, thiserror::Error)]
 enum KitError {
-    #[error("usage: hardware_kit prepare <vector dir> <key.pub> <custody> [--touch] | challenge <staged.json> | check-assertion <assertion.json> | finish <vector dir> <claim> | -Y sign -n <namespace> -f <assertion.json>")]
+    #[error("usage: hardware_kit prepare <vector dir> <key.pub> <custody> [--touch] [--batch] | challenge <staged.json> | check-assertion <assertion.json> | finish <vector dir> <claim> | -Y sign -n <namespace> -f <assertion.json>")]
     Usage,
     #[error("{path}: {source}")]
     File { path: PathBuf, source: std::io::Error },

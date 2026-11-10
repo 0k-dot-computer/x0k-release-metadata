@@ -3,7 +3,7 @@
 ```turtle folio:document
 implementation:release-metadata\/ceremony a x0k:Implementation ;
     x0k:status "draft" ;
-    x0k:summary "The stage, sign and status commands of the release-metadata ceremony: a root or targets file is staged once, each signatory signs it on their own machine through a signer program with ssh-keygen's interface, the status names who is missing, and a targets entry is signed only when it matches the signer's own rebuild." ;
+    x0k:summary "The stage, sign and status commands of the release-metadata ceremony: a root or targets file is staged once, each signatory signs it on their own machine through a signer program with ssh-keygen's interface, several files at once with one batch signature, the status names who is missing, a targets entry is signed only when it matches the signer's own rebuild, and a release's targets file, snapshot and timestamp take one signature." ;
     x0k:concerns "trust", "delivery", "signing", "keys", "ceremony" ;
     x0k:cites implementation:release-metadata\/release-metadata,
         implementation:release-metadata\/vectors ;
@@ -29,10 +29,11 @@ metadata, for example as a commit on a branch that each signer pulls,
 signs and pushes. No signer sees another signer's key, and nothing waits
 on a review.
 
-The crate gives the ceremony three commands in one program,
-`x0k-release-metadata`: `stage`, `sign` and `status`. The library holds
-their logic, so an embedder such as x0k's own tooling can run the same
-steps without the program.
+The crate gives the ceremony its commands in one program,
+`x0k-release-metadata`: `stage`, `sign` and `status`, and `release`,
+`snapshot` and `timestamp` for the files a release adds. The library holds
+their logic, so an embedder such as chariot or x0k's own tooling can run
+the same steps without the program.
 
 ## What the commands must hold
 
@@ -45,6 +46,11 @@ steps without the program.
 - **A signer program, and nothing else, signs** (§7). The commands hold no
   key and choose none. They run the program they are given with
   `ssh-keygen -Y sign`'s arguments, and `ssh-keygen` when given none.
+- **One call to the signer per signing, however many files** (§3). Several
+  staged files are signed with one batch signature, so a security key is
+  touched once; each file shows its own status. A release's targets file,
+  its snapshot and its timestamp are one such signing, and so are a root
+  and the targets file under it.
 - **A rebuild before a release is signed** (§6). Where the build is
   reproducible, `sign` signs a targets file only when every entry matches
   the signer's own rebuild of that artifact, and it names both hashes when
@@ -57,13 +63,13 @@ steps without the program.
   bound. The status shows each delegation's patterns and key ids, so the
   signers review exactly what they grant.
 
-<a name="chunk-ceremony"></a><sub>[`src/ceremony.rs`](../../crates/x0k-release-metadata/src/ceremony.rs) · `#ceremony` · assembles [ceremony-error](#chunk-ceremony-error) · [staged-file](#chunk-staged-file) · [requirement](#chunk-requirement) · [standing](#chunk-standing) · [sign](#chunk-sign) · [rebuild](#chunk-rebuild) · [online](#chunk-online)</sub>
+<a name="chunk-ceremony"></a><sub>[`src/ceremony.rs`](../../crates/x0k-release-metadata/src/ceremony.rs) · `#ceremony` · assembles [ceremony-error](#chunk-ceremony-error) · [staged-file](#chunk-staged-file) · [requirement](#chunk-requirement) · [standing](#chunk-standing) · [sign](#chunk-sign) · [rebuild](#chunk-rebuild) · [online](#chunk-online) · [release](#chunk-release)</sub>
 
 ```rust {#ceremony file="src/ceremony.rs"}
 //! The ceremony of decision §5: stage a file, sign it one signatory at a
 //! time, and show who is still missing.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::time::{Duration, SystemTime};
 
@@ -72,14 +78,16 @@ use serde_json::{json, Map, Value};
 use base64ct::{Base64, Encoding};
 use sha2::{Digest, Sha256};
 
-use crate::canonical::{open_envelope, Signature};
+use crate::batch::{self, check_entry};
+use crate::canonical::{canonical_json, open_envelope, Covered, Envelope, Signature};
+use crate::metadata::Typed;
 use crate::quorum::{KeyRing, Quorum};
-use crate::scheme::{check_signature, parse_sshsig, public_identity, PublicIdentity};
+use crate::scheme::{parse_sshsig, public_identity, PublicIdentity};
 use crate::verify::hex_digest;
 use crate::time::format_utc;
 use crate::{
     parse_utc, DelegatedRole, Key, ListedKey, Malformed, Root, SignatoryRule, SignatoryVerdict,
-    SignatureFault, Signer, SignerError, Snapshot, Targets, Timestamp, NAMESPACE,
+    SignatureFault, Signer, SignerError, Snapshot, Targets, Timestamp, BATCH_NAMESPACE, NAMESPACE,
 };
 
 <<ceremony-error>>
@@ -95,6 +103,8 @@ use crate::{
 <<rebuild>>
 
 <<online>>
+
+<<release>>
 ```
 
 A ceremony step that does not happen says why. The rebuild refusals carry
@@ -130,13 +140,17 @@ pub enum CeremonyError {
     Signer(#[from] SignerError),
     #[error("the signer program did not write an SSH signature")]
     Armor,
-    #[error("the signing key is not one that the staged file's roles list")]
-    KeyNotListed,
+    #[error("the signing key is not one that {role}'s thresholds list")]
+    KeyNotListed { role: String },
+    #[error("there is no staged file to sign")]
+    NothingToSign,
+    #[error("the {kind} file of role {role} is given twice; one signature covers each file once")]
+    RepeatedFile { kind: &'static str, role: String },
     #[error("the new signature does not count: {0}")]
     Signature(#[from] SignatureFault),
     #[error("{path} has no rebuild; rebuild it, or sign as not reproducible")]
     NotRebuilt { path: String },
-    #[error("a rebuild names {path}, which the staged file does not list")]
+    #[error("a rebuild names {path}, which no staged targets file lists")]
     RebuiltUnlisted { path: String },
     #[error("the rebuilt {path} is {rebuilt} bytes; the targets entry lists {listed}")]
     RebuildLength { path: String, listed: u64, rebuilt: u64 },
@@ -423,28 +437,22 @@ impl Requirement {
         found
     }
 
+    /// The role whose file this requirement checks: every threshold is the
+    /// rule of that one role, from one or two files that state it.
+    pub fn role(&self) -> &str {
+        self.thresholds.first().map_or("", |threshold| threshold.role.as_str())
+    }
+
     fn open(&self, staged: &[u8]) -> Result<Opened, CeremonyError> {
         Ok(match self.kind {
-            Kind::Root => {
-                let envelope = open_envelope::<Root>(staged)?;
-                Opened { canonical: envelope.canonical, signatures: envelope.signatures, targets: None }
-            }
+            Kind::Root => Opened::of(open_envelope::<Root>(staged)?, None),
             Kind::Targets => {
                 let envelope = open_envelope::<Targets>(staged)?;
-                Opened {
-                    canonical: envelope.canonical,
-                    signatures: envelope.signatures,
-                    targets: Some(envelope.body),
-                }
+                let targets = envelope.body.clone();
+                Opened::of(envelope, Some(targets))
             }
-            Kind::Snapshot => {
-                let envelope = open_envelope::<Snapshot>(staged)?;
-                Opened { canonical: envelope.canonical, signatures: envelope.signatures, targets: None }
-            }
-            Kind::Timestamp => {
-                let envelope = open_envelope::<Timestamp>(staged)?;
-                Opened { canonical: envelope.canonical, signatures: envelope.signatures, targets: None }
-            }
+            Kind::Snapshot => Opened::of(open_envelope::<Snapshot>(staged)?, None),
+            Kind::Timestamp => Opened::of(open_envelope::<Timestamp>(staged)?, None),
         })
     }
 }
@@ -460,9 +468,22 @@ fn expect_kind(staged: &[u8], expected: Kind) -> Result<(), CeremonyError> {
 
 /// A staged file opened as the verifier opens it.
 struct Opened {
+    kind: &'static str,
+    version: u64,
     canonical: Vec<u8>,
     signatures: Vec<Signature>,
     targets: Option<Targets>,
+}
+
+impl Opened {
+    fn of<T: Typed>(envelope: Envelope<T>, targets: Option<Targets>) -> Self {
+        let (kind, version) = (T::TYPE, envelope.body.version());
+        Self { kind, version, canonical: envelope.canonical, signatures: envelope.signatures, targets }
+    }
+
+    fn covered(&self) -> Covered<'_> {
+        Covered { kind: self.kind, version: self.version, canonical: &self.canonical }
+    }
 }
 ```
 
@@ -506,7 +527,7 @@ impl Requirement {
         let opened = self.open(staged)?;
         let mut standings = Vec::new();
         for threshold in &self.thresholds {
-            let tally = threshold.with_quorum(|quorum| quorum.tally(&opened.canonical, &opened.signatures))?;
+            let tally = threshold.with_quorum(|quorum| quorum.tally(&opened.covered(), &opened.signatures))?;
             standings.push(Standing {
                 label: threshold.label.clone(),
                 threshold: threshold.threshold,
@@ -527,15 +548,26 @@ impl Requirement {
 
 ## Signing
 
-`sign` hands the signer program the canonical bytes of the staged body,
+`sign` hands the signer program what the staged files' signatures cover,
 the namespace and the key the signer named, and takes an armored SSHSIG
-signature back (§7). It never reads the key. It learns which key signed
-from the public key inside the envelope, and adds the signature under
-every key id that a threshold's role lists for that key, so a key that
-the old and the new root list differently still counts for both. Before
-adding it, `sign` checks the signature with the verifier's own scheme
-check, so a signature that would not count is refused here and not by the
-readers later.
+signature back (§7). One file is signed with a single signature: the
+program signs the canonical bytes of its body under `release-metadata`.
+Several files are signed with one batch signature: the program signs the
+batch statement that lists them, under `release-metadata-batch`, so a
+security key is touched once for all of them
+(`implementation:release-metadata/release-metadata`, "Batch signatures").
+Each file's role in the statement is the role its requirement checks.
+
+`sign` never reads the key. It learns which key signed from the public key
+inside the envelope, and adds the signature to each file under every key
+id that a threshold of that file lists for that key, so a key that the old
+and the new root list differently still counts for both. A batch entry
+also carries the statement. Before adding a signature, `sign` checks it
+with the verifier's own check of a signature entry, so a signature that
+would not count is refused here and not by the readers later. Every file
+is checked before any is returned, and a key that some file's thresholds
+do not list is refused, naming the role; the caller writes all the files
+or none.
 
 A targets file is checked against the rebuild first, and the signer
 program is not called when the check fails.
@@ -543,37 +575,76 @@ program is not called when the check fails.
 <a name="chunk-sign"></a><sub>[`src/ceremony.rs`](../../crates/x0k-release-metadata/src/ceremony.rs) · `#sign`</sub>
 
 ```rust {#sign}
-/// Signs `staged` through `signer` with the key that `key` names, and
-/// returns the file with the new signature (§5, step 2). A targets file is
-/// signed only when `rebuild` holds for it (§6).
-pub fn sign(
-    staged: &[u8],
-    requirement: &Requirement,
-    rebuild: &Rebuild,
-    signer: &dyn Signer,
-    key: &Path,
-) -> Result<Vec<u8>, CeremonyError> {
-    let opened = requirement.open(staged)?;
-    if let Some(targets) = &opened.targets {
-        rebuild.check(targets)?;
+/// One staged file to sign: the file, the thresholds it must meet, and the
+/// rebuild its targets entries are checked against (§6).
+#[derive(Clone, Copy)]
+pub struct Staged<'a> {
+    pub file: &'a [u8],
+    pub requirement: &'a Requirement,
+    pub rebuild: &'a Rebuild,
+}
+
+/// Signs `files` through `signer` with the key that `key` names, with one
+/// call to the signer, and returns each file with the new signature, in
+/// order (§5, step 2). One file gets a single signature; several get one
+/// batch signature that counts on each (§3). A targets file is signed only
+/// when its rebuild holds (§6).
+pub fn sign(files: &[Staged<'_>], signer: &dyn Signer, key: &Path) -> Result<Vec<Vec<u8>>, CeremonyError> {
+    let opened = files.iter().map(|file| file.requirement.open(file.file)).collect::<Result<Vec<_>, _>>()?;
+    for file in files {
+        let alongside: Vec<&Targets> = files
+            .iter()
+            .zip(&opened)
+            .filter(|(other, _)| std::ptr::eq(other.rebuild, file.rebuild))
+            .filter_map(|(_, opened)| opened.targets.as_ref())
+            .collect();
+        file.rebuild.check(&alongside)?;
     }
-    let armored = signer.sign(key, NAMESPACE, &opened.canonical)?;
+    let (namespace, message, statement) = match opened.as_slice() {
+        [] => return Err(CeremonyError::NothingToSign),
+        [one] => (NAMESPACE, one.canonical.clone(), None),
+        many => {
+            let statement = batch_statement(files, many)?;
+            (BATCH_NAMESPACE, canonical_json(&statement)?, Some(statement))
+        }
+    };
+    let armored = signer.sign(key, namespace, &message)?;
     let blob = unarmor_sshsig(&armored).ok_or(CeremonyError::Armor)?;
     let envelope = parse_sshsig(&blob).ok_or(CeremonyError::Armor)?;
     let identity = PublicIdentity::Decoded(envelope.public_key.to_vec());
     let sig = hex::encode(&blob);
-    let listed = requirement.listed(&identity);
-    if listed.is_empty() {
-        return Err(CeremonyError::KeyNotListed);
+    let mut signed = Vec::new();
+    for (file, opened) in files.iter().zip(&opened) {
+        let role = file.requirement.role();
+        let listed = file.requirement.listed(&identity);
+        if listed.is_empty() {
+            return Err(CeremonyError::KeyNotListed { role: role.to_owned() });
+        }
+        let mut staged = StagedFile::read(file.file)?;
+        for (keyid, key) in listed {
+            let signature = Signature { keyid, sig: sig.clone(), batch: statement.clone() };
+            check_entry(&key, role, &opened.covered(), &signature)?;
+            staged.signatures.retain(|existing| existing.keyid != signature.keyid);
+            staged.signatures.push(signature);
+        }
+        tracing::debug!(role, signatures = staged.signatures.len(), "release_metadata.ceremony.signed");
+        signed.push(staged.write()?);
     }
-    let mut file = StagedFile::read(staged)?;
-    for (keyid, key) in listed {
-        check_signature(&key, &opened.canonical, &sig)?;
-        file.signatures.retain(|signature| signature.keyid != keyid);
-        file.signatures.push(Signature { keyid, sig: sig.clone() });
+    Ok(signed)
+}
+
+/// The batch statement over `opened`, refusing a file given twice.
+fn batch_statement(files: &[Staged<'_>], opened: &[Opened]) -> Result<Value, CeremonyError> {
+    let mut seen = BTreeSet::new();
+    let mut listings = Vec::new();
+    for (file, opened) in files.iter().zip(opened) {
+        let role = file.requirement.role();
+        if !seen.insert((opened.kind, role)) {
+            return Err(CeremonyError::RepeatedFile { kind: opened.kind, role: role.to_owned() });
+        }
+        listings.push(batch::listing(&opened.covered(), role));
     }
-    tracing::debug!(signatures = file.signatures.len(), "release_metadata.ceremony.signed");
-    file.write()
+    Ok(batch::statement(listings))
 }
 
 /// The binary SSHSIG inside `ssh-keygen -Y sign`'s armor.
@@ -591,10 +662,11 @@ fn unarmor_sshsig(armored: &[u8]) -> Option<Vec<u8>> {
 A build server that an attacker controls can make a bad artifact and a
 correct targets entry for it (§6). Where the build is reproducible, the
 signer rebuilds each artifact from the tagged source on their own machine
-and hands the results to `sign`. Every entry of the targets file must
-then have a rebuild, with the entry's length and every hash it lists. A
-rebuild for a path the file does not list is refused too, since the
-signer meant to check something that is not there. Where the build is not
+and hands the results to `sign`. Every entry of the targets files signed
+with those results must then have a rebuild, with the entry's length and
+every hash it lists. A rebuild for a path that none of those files lists
+is refused too, since the signer meant to check something that is not
+there. Where the build is not
 reproducible, the signer says so with `Rebuild::NotReproducible`; the
 command has no silent default, so a signer who forgot to rebuild is
 refused rather than trusted.
@@ -614,14 +686,16 @@ pub enum Rebuild {
 }
 
 impl Rebuild {
-    fn check(&self, targets: &Targets) -> Result<(), CeremonyError> {
+    /// Checks the targets files signed with this rebuild.
+    fn check(&self, files: &[&Targets]) -> Result<(), CeremonyError> {
         let Rebuild::Rebuilt(artifacts) = self else {
             return Ok(());
         };
-        if let Some(path) = artifacts.keys().find(|path| !targets.targets.contains_key(*path)) {
+        let listed = |path: &String| files.iter().any(|targets| targets.targets.contains_key(path));
+        if let Some(path) = artifacts.keys().find(|path| !listed(path)) {
             return Err(CeremonyError::RebuiltUnlisted { path: path.clone() });
         }
-        for (path, entry) in &targets.targets {
+        for (path, entry) in files.iter().flat_map(|targets| &targets.targets) {
             let bytes = artifacts.get(path).ok_or_else(|| CeremonyError::NotRebuilt { path: path.clone() })?;
             let rebuilt_length = bytes.len() as u64;
             if rebuilt_length != entry.length {
@@ -691,10 +765,7 @@ pub fn sign_snapshot(
         let version = open_envelope::<Targets>(bytes)?.body.version;
         meta.insert(format!("{role}.json"), meta_entry(version, bytes));
     }
-    let version = match previous {
-        Some(previous) => open_envelope::<Snapshot>(previous)?.body.version.saturating_add(1),
-        None => 1,
-    };
+    let version = next_version::<Snapshot>(previous)?;
     let body = json!({
         "_type": "snapshot", "spec_version": SPEC_VERSION, "version": version,
         "expires": format_utc(expires)?, "meta": meta,
@@ -715,10 +786,7 @@ pub fn sign_timestamp(
     key: &Path,
 ) -> Result<Vec<u8>, CeremonyError> {
     let snapshot_version = open_envelope::<Snapshot>(snapshot)?.body.version;
-    let version = match previous {
-        Some(previous) => open_envelope::<Timestamp>(previous)?.body.version.saturating_add(1),
-        None => 1,
-    };
+    let version = next_version::<Timestamp>(previous)?;
     let body = json!({
         "_type": "timestamp", "spec_version": SPEC_VERSION, "version": version,
         "expires": format_utc(expires)?,
@@ -732,12 +800,168 @@ fn meta_entry(version: u64, bytes: &[u8]) -> Value {
     json!({ "version": version, "length": bytes.len(), "hashes": { "sha256": hex::encode(Sha256::digest(bytes)) } })
 }
 
-fn sign_online(kind: Kind, root: &[u8], body: Value, signer: &dyn Signer, key: &Path) -> Result<Vec<u8>, CeremonyError> {
+/// One listed file by its version only, for a file signed in the same batch
+/// as its lister (§6).
+fn version_entry(version: u64) -> Value {
+    json!({ "version": version })
+}
+
+/// An online role's unsigned file and the threshold it must meet under `root`.
+fn online_file(kind: Kind, root: &Root, body: Value) -> Result<(Vec<u8>, Requirement), CeremonyError> {
     let file = StagedFile { signed: body, signatures: Vec::new() }.write()?;
-    let root = open_envelope::<Root>(root)?.body;
     let role = kind.name();
-    let requirement = Requirement::checked(kind, vec![Threshold::top_level(&root, role, role.to_owned())?])?;
-    sign(&file, &requirement, &Rebuild::Rebuilt(BTreeMap::new()), signer, key)
+    let requirement = Requirement::checked(kind, vec![Threshold::top_level(root, role, role.to_owned())?])?;
+    Ok((file, requirement))
+}
+
+fn sign_online(kind: Kind, root: &[u8], body: Value, signer: &dyn Signer, key: &Path) -> Result<Vec<u8>, CeremonyError> {
+    let (file, requirement) = online_file(kind, &open_envelope::<Root>(root)?.body, body)?;
+    let rebuild = Rebuild::Rebuilt(BTreeMap::new());
+    let staged = Staged { file: &file, requirement: &requirement, rebuild: &rebuild };
+    let mut signed = sign(&[staged], signer, key)?;
+    signed.pop().ok_or(CeremonyError::NothingToSign)
+}
+
+/// The version one more than `previous`'s, or 1 for the first file of a role.
+fn next_version<T: Typed + serde::de::DeserializeOwned>(previous: Option<&[u8]>) -> Result<u64, CeremonyError> {
+    Ok(match previous {
+        Some(previous) => open_envelope::<T>(previous)?.body.version().saturating_add(1),
+        None => 1,
+    })
+}
+```
+
+## A release in one touch
+
+A maintainer who signs a release and whose key the root also lists for the
+snapshot and the timestamp signs all three in one batch (§3, §6).
+`sign_release` takes the staged targets file of the release's role, the
+other targets files the snapshot lists, the previous snapshot and
+timestamp, and their expiries. It builds the snapshot and the timestamp,
+and signs the three with one call to the signer, so a security key is
+touched once. The snapshot lists the role's file by version only and every
+other targets file by version, length and SHA-256, as `sign_snapshot`
+does; the timestamp lists the snapshot by version only. Those are the
+files whose signature is made in the same step as their lister's. The
+targets file meets its role's threshold as `sign` checks it: from the root
+for the top-level role, or from the file that delegates an audience.
+
+<a name="chunk-release"></a><sub>[`src/ceremony.rs`](../../crates/x0k-release-metadata/src/ceremony.rs) · `#release`</sub>
+
+```rust {#release}
+/// A release to sign in one batch: the staged targets file of `role`, and
+/// what its snapshot and timestamp are built from (§3, §6).
+#[derive(Clone, Copy)]
+pub struct Release<'a> {
+    /// The trusted root, whose roles list the signer's key.
+    pub root: &'a [u8],
+    /// `targets` for the top-level role, or a delegated role's name.
+    pub role: &'a str,
+    /// The staged targets file of `role`.
+    pub staged: &'a [u8],
+    /// The targets file that delegates `role`; `None` for `targets` itself.
+    pub delegator: Option<&'a [u8]>,
+    pub rebuild: &'a Rebuild,
+    /// The other targets files the snapshot lists, by role name.
+    pub listed: &'a BTreeMap<String, Vec<u8>>,
+    pub previous_snapshot: Option<&'a [u8]>,
+    pub previous_timestamp: Option<&'a [u8]>,
+    pub snapshot_expires: SystemTime,
+    pub timestamp_expires: SystemTime,
+}
+
+/// A release's three files, each carrying the one batch signature.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignedRelease {
+    pub targets: Vec<u8>,
+    pub snapshot: Vec<u8>,
+    pub timestamp: Vec<u8>,
+}
+
+/// Signs a release's targets file, snapshot and timestamp with one batch
+/// signature, through `signer` with the key that `key` names (§3, §6).
+pub fn sign_release(release: &Release<'_>, signer: &dyn Signer, key: &Path) -> Result<SignedRelease, CeremonyError> {
+    let requirement = match release.delegator {
+        None => Requirement::targets(release.staged, release.root)?,
+        Some(delegator) => Requirement::delegated_targets(release.staged, release.root, delegator, release.role)?,
+    };
+    let root = open_envelope::<Root>(release.root)?.body;
+    let mut meta = Map::new();
+    for (role, bytes) in release.listed.iter().filter(|(role, _)| role.as_str() != release.role) {
+        meta.insert(format!("{role}.json"), meta_entry(open_envelope::<Targets>(bytes)?.body.version, bytes));
+    }
+    let version = open_envelope::<Targets>(release.staged)?.body.version;
+    meta.insert(format!("{}.json", release.role), version_entry(version));
+    let snapshot_version = next_version::<Snapshot>(release.previous_snapshot)?;
+    let snapshot = json!({
+        "_type": "snapshot", "spec_version": SPEC_VERSION, "version": snapshot_version,
+        "expires": format_utc(release.snapshot_expires)?, "meta": meta,
+    });
+    let timestamp = json!({
+        "_type": "timestamp", "spec_version": SPEC_VERSION,
+        "version": next_version::<Timestamp>(release.previous_timestamp)?,
+        "expires": format_utc(release.timestamp_expires)?,
+        "meta": { "snapshot.json": version_entry(snapshot_version) },
+    });
+    let (snapshot, snapshot_requirement) = online_file(Kind::Snapshot, &root, snapshot)?;
+    let (timestamp, timestamp_requirement) = online_file(Kind::Timestamp, &root, timestamp)?;
+    let none = Rebuild::Rebuilt(BTreeMap::new());
+    let files = [
+        Staged { file: release.staged, requirement: &requirement, rebuild: release.rebuild },
+        Staged { file: &snapshot, requirement: &snapshot_requirement, rebuild: &none },
+        Staged { file: &timestamp, requirement: &timestamp_requirement, rebuild: &none },
+    ];
+    let mut signed = sign(&files, signer, key)?.into_iter();
+    let mut next = || signed.next().ok_or(CeremonyError::NothingToSign);
+    Ok(SignedRelease { targets: next()?, snapshot: next()?, timestamp: next()? })
+}
+```
+
+A root ceremony is the other place a signer signs two files at once: a new
+root, and the top-level targets file under it, when the root's change
+reaches the targets role, such as a first root, or a new targets key.
+`sign_ceremony` signs both with one batch signature. The targets file is
+checked under the staged root, since that is the root a reader will hold
+when it reads that targets file. A signer whose key only one of the two
+files' thresholds lists is refused, naming the other's role; such a signer
+signs their one file with `sign`.
+
+<a name="chunk-release-2"></a><sub>[`src/ceremony.rs`](../../crates/x0k-release-metadata/src/ceremony.rs) · `#release` · continues</sub>
+
+```rust {#release}
+
+/// A root and the top-level targets file under it, each carrying the one
+/// batch signature.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignedCeremony {
+    pub root: Vec<u8>,
+    pub targets: Vec<u8>,
+}
+
+/// Signs a staged root and the staged top-level targets file under it with
+/// one batch signature (§3, §5). `trusted_root` is the root version before
+/// it, or `None` for a first root.
+pub fn sign_ceremony(
+    root: &[u8],
+    trusted_root: Option<&[u8]>,
+    targets: &[u8],
+    rebuild: &Rebuild,
+    signer: &dyn Signer,
+    key: &Path,
+) -> Result<SignedCeremony, CeremonyError> {
+    let root_requirement = match trusted_root {
+        None => Requirement::first_root(root)?,
+        Some(trusted) => Requirement::next_root(root, trusted)?,
+    };
+    let targets_requirement = Requirement::targets(targets, root)?;
+    let none = Rebuild::Rebuilt(BTreeMap::new());
+    let files = [
+        Staged { file: root, requirement: &root_requirement, rebuild: &none },
+        Staged { file: targets, requirement: &targets_requirement, rebuild },
+    ];
+    let mut signed = sign(&files, signer, key)?.into_iter();
+    let mut next = || signed.next().ok_or(CeremonyError::NothingToSign);
+    Ok(SignedCeremony { root: next()?, targets: next()? })
 }
 ```
 
@@ -876,13 +1100,15 @@ pub enum SignerError {
 
 ## The commands
 
-The program reads and writes the files, reads the clock for `stage`, and
-prints the status; the steps are the library's. `sign` writes the staged
-file in place and prints the status after the new signature, so each
-signer sees what remains. The status ends with one line per delegation:
-`delegates <role>: paths <patterns>; keys <key ids>; threshold <n>`. `status`
-exits 0 when every threshold is met, 1 while a signatory is missing, and 2
-on an error, so a script can wait for the ceremony to finish.
+The program reads and writes the files, reads the clock for `stage` and
+for the expiries, and prints the status; the steps are the library's.
+`sign` writes each staged file in place and prints its status after the
+new signature, one block per file headed by its path, so each signer sees
+what remains. The status ends with one line per delegation:
+`delegates <role>: paths <patterns>; keys <key ids>; threshold <n>`.
+`status` exits 0 when every threshold is met, 1 while a signatory is
+missing, and 2 on an error, so a script can wait for the ceremony to
+finish.
 
 ```
 x0k-release-metadata stage 2.root.body.json 2.root.json
@@ -898,6 +1124,42 @@ x0k-release-metadata sign 1.root.json --key ~/.ssh/id_ed25519_sk
 x0k-release-metadata status 1.root.json
 ```
 
+`sign` takes several staged files and signs them with one batch
+signature, one touch of a security key. A root signed with the top-level
+targets file under it is the common case. A staged root in the same call
+is the root its targets files are checked under, and a top-level
+`targets.json` in the same call is the file that delegates the audiences
+of the others; otherwise `--trusted` and `--delegator` name them. A
+targets file's role is its name as TUF names it, `<role>.json` or
+`<version>.<role>.json`, or `--role` when one targets file is given.
+
+```
+x0k-release-metadata sign 2.root.json targets.json --trusted 1.root.json --key ~/.ssh/id_ed25519_sk
+```
+
+A delegated targets file names the file that delegates it, and a targets
+file is signed with the rebuilt artifacts or with `--not-reproducible`. A
+targets version that delegates is staged with its role:
+
+```
+x0k-release-metadata stage fleet.body.json fleet.json --role fleet
+x0k-release-metadata sign fleet.json --trusted root.json --delegator targets.json \
+    --role fleet --key ~/.ssh/id_ed25519 --rebuilt fleet/chariot-1.0.tar=target/chariot-1.0.tar
+```
+
+A maintainer whose key the root also lists for the snapshot and the
+timestamp releases with one touch. `release` signs the staged targets file,
+writes the snapshot and the timestamp beside it, and signs the three
+together. The files at `--snapshot` and `--timestamp` are the previous
+ones, when they exist, and are replaced:
+
+```
+x0k-release-metadata release fleet.json --trusted root.json --delegator targets.json \
+    --targets targets.json --snapshot snapshot.json --timestamp timestamp.json \
+    --snapshot-expires-in 7d --timestamp-expires-in 1d --key ~/.ssh/id_ed25519_sk \
+    --rebuilt fleet/chariot-1.0.tar=target/chariot-1.0.tar
+```
+
 The build server signs the online roles with its one key. A scheduled
 refresh re-signs the timestamp over the same snapshot, one version up:
 
@@ -908,21 +1170,11 @@ x0k-release-metadata timestamp timestamp.json --trusted root.json --snapshot sna
     --previous timestamp.json --expires-in 1d --key online_ed25519
 ```
 
-A delegated targets file also names the file that delegates it and its
-role, and a targets file is signed with the rebuilt artifacts or with
-`--not-reproducible`. A targets version that delegates is staged with its
-role:
-
-```
-x0k-release-metadata stage fleet.body.json fleet.json --role fleet
-x0k-release-metadata sign fleet.json --trusted root.json --delegator targets.json \
-    --role fleet --key ~/.ssh/id_ed25519 --rebuilt fleet/chariot-1.0.tar=target/chariot-1.0.tar
-```
-
-<a name="chunk-cli"></a><sub>[`src/bin/x0k-release-metadata.rs`](../../crates/x0k-release-metadata/src/bin/x0k-release-metadata.rs) · `#cli` · assembles [cli-arguments](#chunk-cli-arguments) · [cli-commands](#chunk-cli-commands)</sub>
+<a name="chunk-cli"></a><sub>[`src/bin/x0k-release-metadata.rs`](../../crates/x0k-release-metadata/src/bin/x0k-release-metadata.rs) · `#cli` · assembles [cli-arguments](#chunk-cli-arguments) · [cli-files](#chunk-cli-files) · [cli-requirements](#chunk-cli-requirements) · [cli-commands](#chunk-cli-commands)</sub>
 
 ```rust {#cli file="src/bin/x0k-release-metadata.rs"}
-//! The ceremony commands of decision §5: stage, sign and status.
+//! The ceremony commands of decision §5: stage, sign and status, and the
+//! release and online roles of §6.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -933,22 +1185,28 @@ use std::time::{Duration, SystemTime};
 
 use serde::Deserialize;
 use x0k_release_metadata::{
-    sign, sign_snapshot, sign_timestamp, stage, CeremonyError, DelegatedRole, Rebuild, Requirement, SignerProgram,
-    Standing,
+    sign, sign_release, sign_snapshot, sign_timestamp, stage, CeremonyError, DelegatedRole, Rebuild, Release,
+    Requirement, SignerProgram, Staged, Standing,
 };
 
 const USAGE: &str = "\
 usage:
   x0k-release-metadata stage <body.json> <staged.json> [--role <name>]
-  x0k-release-metadata status <staged.json> [--trusted <root.json>] [--delegator <targets.json> --role <name>]
-  x0k-release-metadata sign <staged.json> [--trusted <root.json>] [--delegator <targets.json> --role <name>]
+  x0k-release-metadata status <staged.json> [--trusted <root.json>] [--delegator <targets.json>] [--role <name>]
+  x0k-release-metadata sign <staged.json>... [--trusted <root.json>] [--delegator <targets.json>] [--role <name>]
+      --key <key file> [--signer <program>] [--rebuilt <target path>=<file>]... [--not-reproducible]
+  x0k-release-metadata release <role>.json --trusted <root.json> [--delegator <targets.json>] [--role <name>]
+      [--targets <role>.json]... --snapshot <snapshot.json> --timestamp <timestamp.json>
+      --snapshot-expires-in <hours>h|<days>d --timestamp-expires-in <hours>h|<days>d
       --key <key file> [--signer <program>] [--rebuilt <target path>=<file>]... [--not-reproducible]
   x0k-release-metadata snapshot <snapshot.json> --trusted <root.json> --targets <role>.json...
       [--previous <snapshot.json>] --expires-in <hours>h|<days>d --key <key file> [--signer <program>]
   x0k-release-metadata timestamp <timestamp.json> --trusted <root.json> --snapshot <snapshot.json>
       [--previous <timestamp.json>] --expires-in <hours>h|<days>d --key <key file> [--signer <program>]
 
-A root without --trusted is a first root, version 1.
+A root without --trusted is a first root, version 1. Several staged files
+are signed with one signature. A targets file's role is its name,
+<role>.json, or --role.
 ";
 
 #[derive(Debug, thiserror::Error)]
@@ -970,6 +1228,10 @@ enum CommandError {
 }
 
 <<cli-arguments>>
+
+<<cli-files>>
+
+<<cli-requirements>>
 
 <<cli-commands>>
 
@@ -1002,9 +1264,9 @@ struct Arguments {
 }
 
 fn parse_ceremony_arguments(mut args: impl Iterator<Item = String>) -> Result<Arguments, CommandError> {
-    const WITH_VALUE: [&str; 10] = [
-        "--trusted", "--delegator", "--role", "--key", "--signer", "--rebuilt", "--targets", "--snapshot", "--previous",
-        "--expires-in",
+    const WITH_VALUE: [&str; 13] = [
+        "--trusted", "--delegator", "--role", "--key", "--signer", "--rebuilt", "--targets", "--snapshot", "--timestamp",
+        "--previous", "--expires-in", "--snapshot-expires-in", "--timestamp-expires-in",
     ];
     let mut parsed = Arguments { positional: Vec::new(), options: BTreeMap::new(), not_reproducible: false };
     while let Some(arg) = args.next() {
@@ -1034,14 +1296,31 @@ impl Arguments {
     fn required(&self, name: &str) -> Result<&str, CommandError> {
         self.one(name)?.ok_or(CommandError::Usage("a required option is missing"))
     }
+
+    fn all(&self, name: &str) -> &[String] {
+        self.options.get(name).map(Vec::as_slice).unwrap_or_default()
+    }
 }
 ```
 
-<a name="chunk-cli-commands"></a><sub>[`src/ceremony.rs`](../../crates/x0k-release-metadata/src/ceremony.rs) · `#cli-commands`</sub>
+A file's role comes from its name the way TUF names metadata files:
+`stable.json`, or `3.stable.json` in a repository with consistent
+snapshots.
 
-```rust {#cli-commands}
+<a name="chunk-cli-files"></a><sub>[`src/ceremony.rs`](../../crates/x0k-release-metadata/src/ceremony.rs) · `#cli-files`</sub>
+
+```rust {#cli-files}
 fn read_ceremony_file(path: &Path) -> Result<Vec<u8>, CommandError> {
     fs::read(path).map_err(|source| CommandError::File { path: path.to_owned(), source })
+}
+
+/// The file at `path`, or `None` when there is none yet.
+fn read_if_present(path: &Path) -> Result<Option<Vec<u8>>, CommandError> {
+    match fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(source) => Err(CommandError::File { path: path.to_owned(), source }),
+    }
 }
 
 fn write_ceremony_file(path: &Path, bytes: &[u8]) -> Result<(), CommandError> {
@@ -1072,30 +1351,93 @@ fn optional_file(args: &Arguments, name: &str) -> Result<Option<Vec<u8>>, Comman
     args.one(name)?.map(|path| read_ceremony_file(Path::new(path))).transpose()
 }
 
-/// The requirement the staged file's kind and the given files name.
-fn requirement_for(staged: &[u8], args: &Arguments) -> Result<Requirement, CommandError> {
-    let kind = header_of(staged)?.kind;
-    let trusted = optional_file(args, "--trusted")?;
-    let delegator = optional_file(args, "--delegator")?;
-    let role = args.one("--role")?;
-    Ok(match (kind.as_str(), trusted, delegator, role) {
-        ("root", None, None, None) => Requirement::first_root(staged)?,
-        ("root", Some(trusted), None, None) => Requirement::next_root(staged, &trusted)?,
-        ("root", ..) => return Err(CommandError::Usage("a root takes no --delegator or --role")),
-        ("targets", Some(root), None, None) => Requirement::targets(staged, &root)?,
-        ("targets", Some(root), Some(delegator), Some(role)) => {
-            Requirement::delegated_targets(staged, &root, &delegator, role)?
-        }
-        ("targets", None, ..) => return Err(CommandError::Usage("a targets file takes --trusted <root.json>")),
-        ("targets", ..) => return Err(CommandError::Usage("--delegator and --role go together")),
-        _ => return Err(CommandError::Usage("status and sign take root and targets files")),
-    })
+/// The role TUF's file name gives: `<role>.json`, or `<version>.<role>.json`.
+fn role_named(path: &Path) -> Result<String, CommandError> {
+    let stem = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .ok_or(CommandError::Usage("a targets file is named <role>.json"))?;
+    let role = match stem.split_once('.') {
+        Some((version, role)) if !version.is_empty() && version.bytes().all(|b| b.is_ascii_digit()) => role,
+        _ => stem,
+    };
+    Ok(role.to_owned())
 }
 
-/// The expiry `--expires-in` names, from the clock now.
-fn expiry_for(args: &Arguments) -> Result<SystemTime, CommandError> {
-    let usage = CommandError::Usage("--expires-in takes <hours>h or <days>d");
-    let text = args.required("--expires-in")?;
+/// The targets files `--targets` names, by role.
+fn targets_files(args: &Arguments) -> Result<BTreeMap<String, Vec<u8>>, CommandError> {
+    let mut targets = BTreeMap::new();
+    for path in args.all("--targets") {
+        let path = Path::new(path);
+        targets.insert(role_named(path)?, read_ceremony_file(path)?);
+    }
+    Ok(targets)
+}
+```
+
+What each staged file must carry follows from its kind, its role and the
+files given with it. A root is checked against `--trusted`, or is a first
+root. A targets file is checked under the root staged in the same call, or
+`--trusted`; a delegated role's file also under the top-level targets file
+staged in the same call, or `--delegator`.
+
+<a name="chunk-cli-requirements"></a><sub>[`src/ceremony.rs`](../../crates/x0k-release-metadata/src/ceremony.rs) · `#cli-requirements`</sub>
+
+```rust {#cli-requirements}
+/// The role a staged file is a version of: `root`, or a targets file's
+/// `--role` or file name.
+fn role_of(path: &Path, kind: &str, args: &Arguments) -> Result<String, CommandError> {
+    match kind {
+        "root" => Ok("root".to_owned()),
+        "targets" => args.one("--role")?.map_or_else(|| role_named(path), |role| Ok(role.to_owned())),
+        _ => Err(CommandError::Usage("status and sign take root and targets files")),
+    }
+}
+
+/// What each staged file must carry, given the files staged with it.
+fn requirements_for(paths: &[&Path], files: &[Vec<u8>], args: &Arguments) -> Result<Vec<Requirement>, CommandError> {
+    let kinds = files.iter().map(|file| header_of(file).map(|h| h.kind)).collect::<Result<Vec<_>, _>>()?;
+    if args.one("--role")?.is_some() && kinds.iter().filter(|kind| *kind == "targets").count() != 1 {
+        return Err(CommandError::Usage("--role names the role of the one targets file it is given with"));
+    }
+    let roles = paths.iter().zip(&kinds).map(|(path, kind)| role_of(path, kind, args)).collect::<Result<Vec<_>, _>>()?;
+    if roles.iter().filter(|role| *role == "root").count() > 1 {
+        return Err(CommandError::Usage("one call signs one root"));
+    }
+    let trusted = optional_file(args, "--trusted")?;
+    let delegator = optional_file(args, "--delegator")?;
+    if delegator.is_some() && roles.iter().all(|role| role == "root" || role == "targets") {
+        return Err(CommandError::Usage("--delegator goes with a delegated role's file"));
+    }
+    let staged = |wanted: &str| roles.iter().position(|role| role == wanted).map(|at| files[at].as_slice());
+    let root = staged("root").or(trusted.as_deref());
+    let delegating = staged("targets").or(delegator.as_deref());
+    let mut requirements = Vec::new();
+    for (file, role) in files.iter().zip(&roles) {
+        let under_root = || root.ok_or(CommandError::Usage("a targets file takes --trusted <root.json>"));
+        requirements.push(match role.as_str() {
+            "root" => match &trusted {
+                None => Requirement::first_root(file)?,
+                Some(trusted) => Requirement::next_root(file, trusted)?,
+            },
+            "targets" => Requirement::targets(file, under_root()?)?,
+            role => {
+                let delegating = delegating.ok_or(CommandError::Usage("a delegated role's file takes --delegator <targets.json>"))?;
+                Requirement::delegated_targets(file, under_root()?, delegating, role)?
+            }
+        });
+    }
+    Ok(requirements)
+}
+```
+
+<a name="chunk-cli-commands"></a><sub>[`src/ceremony.rs`](../../crates/x0k-release-metadata/src/ceremony.rs) · `#cli-commands` · assembles [cli-release](#chunk-cli-release)</sub>
+
+```rust {#cli-commands}
+/// The expiry the option `name` gives, from the clock now.
+fn expiry_for(args: &Arguments, name: &str) -> Result<SystemTime, CommandError> {
+    let usage = CommandError::Usage("an expiry takes <hours>h or <days>d");
+    let text = args.required(name)?;
     let (count, unit) = match (text.strip_suffix('h'), text.strip_suffix('d')) {
         (Some(count), _) => (count, 3_600),
         (_, Some(count)) => (count, 86_400),
@@ -1113,17 +1455,16 @@ fn signer_for(args: &Arguments) -> Result<SignerProgram, CommandError> {
     }))
 }
 
-fn write_online(path: &str, file: &[u8]) -> Result<ExitCode, CommandError> {
+fn write_online(path: &str, file: &[u8]) -> Result<(), CommandError> {
     write_ceremony_file(Path::new(path), file)?;
     let header = header_of(file)?;
     let mut stdout = std::io::stdout().lock();
     writeln!(stdout, "{path}: {} version {}, expires {}", header.kind, header.version, header.expires)
-        .map_err(CommandError::Status)?;
-    Ok(ExitCode::SUCCESS)
+        .map_err(CommandError::Status)
 }
 
 fn rebuild_for(args: &Arguments) -> Result<Rebuild, CommandError> {
-    let rebuilt = args.options.get("--rebuilt").map(Vec::as_slice).unwrap_or_default();
+    let rebuilt = args.all("--rebuilt");
     if args.not_reproducible {
         if !rebuilt.is_empty() {
             return Err(CommandError::Usage("--rebuilt and --not-reproducible exclude each other"));
@@ -1138,7 +1479,8 @@ fn rebuild_for(args: &Arguments) -> Result<Rebuild, CommandError> {
     Ok(Rebuild::Rebuilt(artifacts))
 }
 
-fn write_status(standings: &[Standing], delegations: &[DelegatedRole]) -> Result<ExitCode, CommandError> {
+/// Writes how each threshold stands, and each delegation; true when all are met.
+fn write_status(standings: &[Standing], delegations: &[DelegatedRole]) -> Result<bool, CommandError> {
     let mut stdout = std::io::stdout().lock();
     for standing in standings {
         let state = if standing.met() {
@@ -1161,8 +1503,24 @@ fn write_status(standings: &[Standing], delegations: &[DelegatedRole]) -> Result
         writeln!(stdout, "delegates {name}: {covers}; keys {keys}; threshold {}", role.threshold)
             .map_err(CommandError::Status)?;
     }
-    Ok(if standings.iter().all(Standing::met) { ExitCode::SUCCESS } else { ExitCode::from(1) })
+    Ok(standings.iter().all(Standing::met))
 }
+
+/// Writes one file's status under a line naming it.
+fn write_file_status(path: &Path, requirement: &Requirement, file: &[u8]) -> Result<bool, CommandError> {
+    writeln!(std::io::stdout().lock(), "{}:", path.display()).map_err(CommandError::Status)?;
+    write_status(&requirement.standing(file)?, &requirement.delegations(file)?)
+}
+
+fn exit_for(met: bool) -> ExitCode {
+    if met {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    }
+}
+
+<<cli-release>>
 
 fn run_ceremony_command(args: &Arguments) -> Result<ExitCode, CommandError> {
     let words: Vec<&str> = args.positional.iter().map(String::as_str).collect();
@@ -1173,49 +1531,99 @@ fn run_ceremony_command(args: &Arguments) -> Result<ExitCode, CommandError> {
             Ok(ExitCode::SUCCESS)
         }
         ["status", staged] => {
-            let staged = read_ceremony_file(Path::new(staged))?;
-            let requirement = requirement_for(&staged, args)?;
-            write_status(&requirement.standing(&staged)?, &requirement.delegations(&staged)?)
+            let path = Path::new(staged);
+            let staged = read_ceremony_file(path)?;
+            let requirement = requirements_for(&[path], std::slice::from_ref(&staged), args)?.remove(0);
+            write_status(&requirement.standing(&staged)?, &requirement.delegations(&staged)?).map(exit_for)
         }
-        ["sign", staged_path] => {
-            let staged = read_ceremony_file(Path::new(staged_path))?;
-            let requirement = requirement_for(&staged, args)?;
+        ["sign", staged_paths @ ..] if !staged_paths.is_empty() => {
+            let paths: Vec<&Path> = staged_paths.iter().map(Path::new).collect();
+            let files = paths.iter().map(|path| read_ceremony_file(path)).collect::<Result<Vec<_>, _>>()?;
+            let requirements = requirements_for(&paths, &files, args)?;
             let rebuild = rebuild_for(args)?;
             let signer = signer_for(args)?;
             let key = Path::new(args.required("--key")?);
-            let signed = sign(&staged, &requirement, &rebuild, &signer, key)?;
-            write_ceremony_file(Path::new(staged_path), &signed)?;
-            write_status(&requirement.standing(&signed)?, &requirement.delegations(&signed)?).map(|_| ExitCode::SUCCESS)
+            let staged: Vec<Staged<'_>> = files
+                .iter()
+                .zip(&requirements)
+                .map(|(file, requirement)| Staged { file, requirement, rebuild: &rebuild })
+                .collect();
+            let signed = sign(&staged, &signer, key)?;
+            for (path, file) in paths.iter().zip(&signed) {
+                write_ceremony_file(path, file)?;
+            }
+            for ((path, requirement), file) in paths.iter().zip(&requirements).zip(&signed) {
+                write_file_status(path, requirement, file)?;
+            }
+            Ok(ExitCode::SUCCESS)
         }
+        ["release", staged] => run_release(Path::new(staged), args),
         ["snapshot", out] => {
             let root = read_ceremony_file(Path::new(args.required("--trusted")?))?;
             let previous = optional_file(args, "--previous")?;
-            let mut targets = BTreeMap::new();
-            for path in args.options.get("--targets").map(Vec::as_slice).unwrap_or_default() {
-                let path = Path::new(path);
-                let role = path
-                    .file_stem()
-                    .and_then(|stem| stem.to_str())
-                    .ok_or(CommandError::Usage("a --targets file is named <role>.json"))?;
-                targets.insert(role.to_owned(), read_ceremony_file(path)?);
-            }
+            let targets = targets_files(args)?;
             if targets.is_empty() {
                 return Err(CommandError::Usage("snapshot takes at least one --targets <role>.json"));
             }
-            let (expires, signer, key) = (expiry_for(args)?, signer_for(args)?, args.required("--key")?);
+            let (expires, signer, key) = (expiry_for(args, "--expires-in")?, signer_for(args)?, args.required("--key")?);
             let file = sign_snapshot(&root, previous.as_deref(), &targets, expires, &signer, Path::new(key))?;
-            write_online(out, &file)
+            write_online(out, &file).map(|()| ExitCode::SUCCESS)
         }
         ["timestamp", out] => {
             let root = read_ceremony_file(Path::new(args.required("--trusted")?))?;
             let previous = optional_file(args, "--previous")?;
             let snapshot = read_ceremony_file(Path::new(args.required("--snapshot")?))?;
-            let (expires, signer, key) = (expiry_for(args)?, signer_for(args)?, args.required("--key")?);
+            let (expires, signer, key) = (expiry_for(args, "--expires-in")?, signer_for(args)?, args.required("--key")?);
             let file = sign_timestamp(&root, previous.as_deref(), &snapshot, expires, &signer, Path::new(key))?;
-            write_online(out, &file)
+            write_online(out, &file).map(|()| ExitCode::SUCCESS)
         }
         _ => Err(CommandError::Usage("unknown command")),
     }
+}
+```
+
+`release` reads the staged targets file, the root, the delegating file
+for an audience, the other targets files the snapshot lists, and the
+previous snapshot and timestamp where they exist. It writes the three
+signed files, the targets file's status, and one line for each online
+file.
+
+<a name="chunk-cli-release"></a><sub>[`src/ceremony.rs`](../../crates/x0k-release-metadata/src/ceremony.rs) · `#cli-release`</sub>
+
+```rust {#cli-release}
+fn run_release(path: &Path, args: &Arguments) -> Result<ExitCode, CommandError> {
+    let staged = read_ceremony_file(path)?;
+    let root = read_ceremony_file(Path::new(args.required("--trusted")?))?;
+    let role = role_of(path, "targets", args)?;
+    let delegator = optional_file(args, "--delegator")?;
+    match (role.as_str(), &delegator) {
+        ("targets", Some(_)) => return Err(CommandError::Usage("the top-level targets file takes no --delegator")),
+        ("targets", None) | (_, Some(_)) => {}
+        (_, None) => return Err(CommandError::Usage("a delegated role's file takes --delegator <targets.json>")),
+    }
+    let (snapshot_path, timestamp_path) = (args.required("--snapshot")?, args.required("--timestamp")?);
+    let previous_snapshot = read_if_present(Path::new(snapshot_path))?;
+    let previous_timestamp = read_if_present(Path::new(timestamp_path))?;
+    let (listed, rebuild, signer) = (targets_files(args)?, rebuild_for(args)?, signer_for(args)?);
+    let release = Release {
+        root: &root,
+        role: &role,
+        staged: &staged,
+        delegator: delegator.as_deref(),
+        rebuild: &rebuild,
+        listed: &listed,
+        previous_snapshot: previous_snapshot.as_deref(),
+        previous_timestamp: previous_timestamp.as_deref(),
+        snapshot_expires: expiry_for(args, "--snapshot-expires-in")?,
+        timestamp_expires: expiry_for(args, "--timestamp-expires-in")?,
+    };
+    let signed = sign_release(&release, &signer, Path::new(args.required("--key")?))?;
+    write_ceremony_file(path, &signed.targets)?;
+    let requirement = requirements_for(&[path], std::slice::from_ref(&signed.targets), args)?.remove(0);
+    write_file_status(path, &requirement, &signed.targets)?;
+    write_online(snapshot_path, &signed.snapshot)?;
+    write_online(timestamp_path, &signed.timestamp)?;
+    Ok(ExitCode::SUCCESS)
 }
 ```
 
@@ -1243,8 +1651,12 @@ Unix only.
 | `a_failed_signer_program_reports_what_it_wrote` | §7 | A signer program that fails has its error output in the error, and a signer that succeeds prints nothing. |
 | `a_first_root_is_signed_one_signatory_at_a_time` | §5 | A first root is staged and signed one signatory after another; its status says 1 of 2 until the second signs, then met, and readers start from the result. |
 | `a_targets_entry_that_differs_from_the_signers_rebuild_is_not_signed` | §6 | `sign` refuses a targets file whose entry differs from the signer's rebuild, naming both hashes, and refuses one with no rebuild; the signer program is not called; the matching rebuild is signed. |
+| `a_root_and_its_targets_file_are_signed_with_one_call` | §3, §5 | `sign` given a root and a targets file calls the signer program once, under `release-metadata-batch`, with the batch statement that lists both; each file carries the one signature and the statement; the status is shown per file; a reader reads the targets file under the signed root. |
+| `a_release_is_signed_with_one_call_and_lists_its_files_by_version` | §3, §6 | `sign_release` signs a targets file, its snapshot and its timestamp with one call; the snapshot lists the targets file by version only and the timestamp the snapshot; the release verifies; another file of the same version carrying the release's signature is refused, its fault naming the body's hash. |
+| `a_batch_signer_that_one_files_thresholds_do_not_list_is_refused` | §3 | `sign_ceremony` refuses a key that the root's thresholds list and the targets role does not, naming `targets`, and signs both files when the key is listed for both. |
+| `the_release_command_signs_three_files_with_one_call_to_ssh_keygen` | §3, §6, §7 | The `release` command signs an audience's file, the snapshot and the timestamp through `ssh-keygen` itself, with one call, and the three verify. |
 
-<a name="chunk-ceremony-tests"></a><sub>[`tests/conformance/ceremony.rs`](../../crates/x0k-release-metadata/tests/conformance/ceremony.rs) · `#ceremony-tests` · assembles [ceremony-keys](#chunk-ceremony-keys) · [ceremony-scratch](#chunk-ceremony-scratch) · [ceremony-bodies](#chunk-ceremony-bodies) · [ceremony-cases](#chunk-ceremony-cases)</sub>
+<a name="chunk-ceremony-tests"></a><sub>[`tests/conformance/ceremony.rs`](../../crates/x0k-release-metadata/tests/conformance/ceremony.rs) · `#ceremony-tests` · assembles [ceremony-keys](#chunk-ceremony-keys) · [ceremony-scratch](#chunk-ceremony-scratch) · [ceremony-bodies](#chunk-ceremony-bodies) · [ceremony-cases](#chunk-ceremony-cases) · [ceremony-batch-cases](#chunk-ceremony-batch-cases)</sub>
 
 ```rust {#ceremony-tests file="tests/conformance/ceremony.rs"}
 //! Decision §5, §6 and §7: the ceremony commands, run as a maintainer runs them.
@@ -1265,8 +1677,9 @@ use ssh_key::private::Ed25519Keypair;
 use ssh_key::public::KeyData;
 use ssh_key::{HashAlg, LineEnding, PrivateKey, PublicKey, SshSig};
 use x0k_release_metadata::{
-    canonical_json, key_id, parse_utc, sign_snapshot, sign_timestamp, verify, Artifact, Fetched, Refusal, Signer,
-    SignerError, SignerProgram, TrustedState, Verified, NAMESPACE,
+    canonical_json, key_id, parse_utc, sign_ceremony, sign_release, sign_snapshot, sign_timestamp, stage, verify,
+    Artifact, CeremonyError, Fetched, Rebuild, Refusal, Release, SignatureFault, Signer, SignerError, SignerProgram,
+    TrustedState, Verified, BATCH_NAMESPACE, NAMESPACE,
 };
 
 const PROGRAM: &str = env!("CARGO_BIN_EXE_x0k-release-metadata");
@@ -1282,6 +1695,8 @@ const PATH: &str = "fleet/chariot-1.0.tar";
 <<ceremony-bodies>>
 
 <<ceremony-cases>>
+
+<<ceremony-batch-cases>>
 ```
 
 A signatory's key is an SSH key, as `ssh-keygen` holds it; the online key
@@ -1310,7 +1725,11 @@ impl SignatoryKey {
     }
 
     fn sshsig(&self, message: &[u8]) -> SshSig {
-        self.private.sign(NAMESPACE, HashAlg::Sha512, message).expect("sshsig")
+        self.sshsig_under(NAMESPACE, message)
+    }
+
+    fn sshsig_under(&self, namespace: &str, message: &[u8]) -> SshSig {
+        self.private.sign(namespace, HashAlg::Sha512, message).expect("sshsig")
     }
 
     fn signature(&self, message: &[u8]) -> Value {
@@ -1387,6 +1806,12 @@ impl Scratch {
         fs::write(&path, script).expect("stub signer");
         fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("executable");
         path
+    }
+
+    /// Prepares the stub's answer for `key` as a batch signature over `message`.
+    fn prepare_batch(&self, key: &SignatoryKey, message: &[u8]) {
+        let pem = key.sshsig_under(BATCH_NAMESPACE, message).to_pem(LineEnding::LF).expect("armor");
+        fs::write(self.path(&format!("{}.sig", key.name)), pem).expect("prepared signature");
     }
 
     fn calls(&self) -> Vec<String> {
@@ -1981,5 +2406,233 @@ fn a_signer_without_a_sink_prints_nothing() {
     assert!(child.status.success(), "{}", stderr(&child));
     assert!(stdout(&child).contains("1 passed"), "the child ran the signing: {}", stdout(&child));
     assert!(!stderr(&child).contains("Signing data on standard input"), "a quiet signer printed: {}", stderr(&child));
+}
+```
+
+## Batch signing
+
+The batch tests sign several files with one key and count the calls to
+the signer. The statement a batch signature signs is computed here a
+second time, from the decision's description of it, so a change to its
+format is red here and not only in the vectors.
+
+<a name="chunk-ceremony-batch-cases"></a><sub>[`src/ceremony.rs`](../../crates/x0k-release-metadata/src/ceremony.rs) · `#ceremony-batch-cases`</sub>
+
+```rust {#ceremony-batch-cases}
+
+/// The statement a batch signature over `files` signs: each file's type,
+/// role, version and the SHA-256 of its body's canonical bytes.
+fn batch_statement(files: &[(&str, &str, &Value)]) -> Value {
+    let listed: Vec<Value> = files
+        .iter()
+        .map(|(kind, role, body)| {
+            let sha256 = hex::encode(Sha256::digest(message(body)));
+            json!({ "_type": kind, "role": role, "version": body["version"], "hashes": { "sha256": sha256 } })
+        })
+        .collect();
+    json!({ "_type": "release-metadata-batch", "files": listed })
+}
+
+fn signed_file(path: &Path) -> Value {
+    serde_json::from_slice(&fs::read(path).expect("signed file")).expect("json")
+}
+
+/// A reader that trusts `root` looks up the artifact in `targets`, under a
+/// snapshot and a timestamp that the online key signs.
+fn read_release(root: Vec<u8>, targets: BTreeMap<String, Vec<u8>>, online: &OnlineKey) -> Result<Verified, Refusal> {
+    let bytes = |value: &Value| serde_json::to_vec(value).expect("json");
+    let meta: Map<String, Value> = targets.keys().map(|role| (format!("{role}.json"), json!({ "version": 1 }))).collect();
+    let snapshot = json!({ "_type": "snapshot", "spec_version": "1.0.37", "version": 1, "expires": LATER, "meta": meta });
+    let snapshot = bytes(&envelope(&snapshot, vec![online.signature(&message(&snapshot))]));
+    let timestamp = json!({
+        "_type": "timestamp", "spec_version": "1.0.37", "version": 1, "expires": LATER,
+        "meta": { "snapshot.json": { "version": 1 } },
+    });
+    let timestamp = bytes(&envelope(&timestamp, vec![online.signature(&message(&timestamp))]));
+    let fetched = Fetched { roots: Vec::new(), timestamp, snapshot, targets };
+    let hashes = BTreeMap::from([("sha256".to_owned(), hex::encode(Sha256::digest(ARTIFACT)))]);
+    let artifact = Artifact { length: ARTIFACT.len() as u64, hashes };
+    verify(&TrustedState::from_root(root), &fetched, PATH, &artifact, parse_utc(NOW).expect("now"))
+}
+
+#[test]
+fn a_root_and_its_targets_file_are_signed_with_one_call() {
+    let scratch = Scratch::new();
+    let keys = [SignatoryKey::new(1, "root-1"), SignatoryKey::new(2, "root-2")];
+    let online = OnlineKey::new();
+    let root = root_body(1, &[&keys[0], &keys[1]], &keys[0], &online);
+    let targets = targets_body(&[PATH], None);
+    let (root_path, targets_path) = (scratch.path("1.root.json"), scratch.path("targets.json"));
+    for (body, staged) in [(&root, &root_path), (&targets, &targets_path)] {
+        let body = text(&scratch.put("body.json", body));
+        assert!(scratch.run(&["stage", &body, &text(staged)]).status.success());
+    }
+    fs::write(scratch.path("rebuilt.tar"), ARTIFACT).expect("rebuild");
+    let statement = batch_statement(&[("root", "root", &root), ("targets", "targets", &targets)]);
+    let signer = text(&scratch.stub_signer(&[&keys[1]], &message(&root)));
+    scratch.prepare_batch(&keys[0], &message(&statement));
+    let rebuilt = format!("{PATH}={}", text(&scratch.path("rebuilt.tar")));
+    let (root_text, targets_text) = (text(&root_path), text(&targets_path));
+
+    let key = text(&scratch.path("root-1"));
+    let both = scratch.run(&["sign", &root_text, &targets_text, "--key", &key, "--signer", &signer, "--rebuilt", &rebuilt]);
+    assert!(both.status.success(), "{}", stderr(&both));
+    assert_eq!(scratch.calls(), vec![format!("-Y sign -n release-metadata-batch -f {key}")]);
+    assert_eq!(fs::read(scratch.path("message")).expect("recorded message"), message(&statement));
+    for path in [&root_path, &targets_path] {
+        let entry = &signed_file(path)["signatures"][0];
+        assert_eq!((&entry["keyid"], &entry["x-release-metadata-batch"]), (&json!(keys[0].id), &statement), "{}", path.display());
+    }
+    let shown = stdout(&both);
+    assert!(shown.contains(&format!("{root_text}:\nroot version 1: 1 of 2 signatories count; missing root-2")), "{shown}");
+    assert!(shown.contains(&format!("{targets_text}:\ntargets: 1 of 1 signatories count; met")), "{shown}");
+
+    let second = scratch.run(&["sign", &root_text, "--key", &text(&scratch.path("root-2")), "--signer", &signer]);
+    assert!(second.status.success(), "{}", stderr(&second));
+    let signed_root = fs::read(&root_path).expect("root");
+    let files = BTreeMap::from([("targets".to_owned(), fs::read(&targets_path).expect("targets"))]);
+    let verified = read_release(signed_root, files, &online).expect("a reader starts from the root and reads its targets");
+    assert_eq!(verified.target.role, "targets");
+}
+
+/// A signer that signs in process and records the namespace of each call.
+struct CountingSigner<'a> {
+    key: &'a SignatoryKey,
+    calls: Mutex<Vec<String>>,
+}
+
+impl Signer for CountingSigner<'_> {
+    fn sign(&self, key: &Path, namespace: &str, message: &[u8]) -> Result<Vec<u8>, SignerError> {
+        self.calls.lock().expect("calls").push(namespace.to_owned());
+        InProcessSigner(self.key).sign(key, namespace, message)
+    }
+}
+
+/// A root whose targets, snapshot and timestamp roles are Alice's one key.
+fn alice_releases(alice: &SignatoryKey, root_keys: &[&SignatoryKey]) -> Value {
+    let mut keys: Map<String, Value> = root_keys.iter().map(|k| (k.id.clone(), k.object.clone())).collect();
+    keys.insert(alice.id.clone(), alice.object.clone());
+    let root_ids: Vec<&str> = root_keys.iter().map(|k| k.id.as_str()).collect();
+    json!({
+        "_type": "root", "spec_version": "1.0.37", "consistent_snapshot": false,
+        "version": 1, "expires": LATER, "keys": keys,
+        "roles": {
+            "root": { "keyids": root_ids, "threshold": 2 },
+            "timestamp": { "keyids": [alice.id], "threshold": 1 },
+            "snapshot": { "keyids": [alice.id], "threshold": 1 },
+            "targets": { "keyids": [alice.id], "threshold": 1 },
+        },
+    })
+}
+
+#[test]
+fn a_release_is_signed_with_one_call_and_lists_its_files_by_version() {
+    let alice = SignatoryKey::new(20, "alice");
+    let root_keys = [SignatoryKey::new(1, "root-1"), SignatoryKey::new(2, "root-2")];
+    let root = serde_json::to_vec(&envelope(&alice_releases(&alice, &[&root_keys[0], &root_keys[1]]), Vec::new())).expect("root");
+    let staged = stage(&message(&targets_body(&[PATH], None)), None, SystemTime::now()).expect("staged targets");
+    let signer = CountingSigner { key: &alice, calls: Mutex::new(Vec::new()) };
+    let rebuild = Rebuild::Rebuilt(BTreeMap::from([(PATH.to_owned(), ARTIFACT.to_vec())]));
+    let (listed, later) = (BTreeMap::new(), SystemTime::now() + hours(24));
+    let release = Release {
+        root: &root, role: "targets", staged: &staged, delegator: None, rebuild: &rebuild, listed: &listed,
+        previous_snapshot: None, previous_timestamp: None, snapshot_expires: later, timestamp_expires: later,
+    };
+    let signed = sign_release(&release, &signer, Path::new("alice")).expect("the release signs");
+    assert_eq!(*signer.calls.lock().expect("calls"), ["release-metadata-batch"]);
+    let (snapshot, timestamp): (Value, Value) =
+        (serde_json::from_slice(&signed.snapshot).expect("json"), serde_json::from_slice(&signed.timestamp).expect("json"));
+    assert_eq!(snapshot["signed"]["meta"], json!({ "targets.json": { "version": 1 } }));
+    assert_eq!(timestamp["signed"]["meta"], json!({ "snapshot.json": { "version": 1 } }));
+
+    let fetch = |targets: Vec<u8>| Fetched {
+        roots: Vec::new(),
+        timestamp: signed.timestamp.clone(),
+        snapshot: signed.snapshot.clone(),
+        targets: BTreeMap::from([("targets".to_owned(), targets)]),
+    };
+    let hashes = BTreeMap::from([("sha256".to_owned(), hex::encode(Sha256::digest(ARTIFACT)))]);
+    let artifact = Artifact { length: ARTIFACT.len() as u64, hashes };
+    let trusted = TrustedState::from_root(root.clone());
+    let verified = verify(&trusted, &fetch(signed.targets.clone()), PATH, &artifact, SystemTime::now()).expect("verifies");
+    assert_eq!(verified.target.role, "targets");
+
+    // Another targets file of the same version, carrying the release's
+    // signature, is refused: the statement names the real body's hash.
+    let mut other: Value = serde_json::from_slice(&signed.targets).expect("json");
+    other["signed"]["targets"]["fleet/chariot-6.6.tar"] = other["signed"]["targets"][PATH].clone();
+    let refusal = verify(&trusted, &fetch(serde_json::to_vec(&other).expect("json")), PATH, &artifact, SystemTime::now())
+        .expect_err("a substituted file of the same version");
+    assert_eq!((refusal.role.as_str(), refusal.rule.code()), ("targets", "threshold"));
+    let alice_verdict = refusal.signatories.iter().find(|v| v.signatory == "alice").expect("alice named");
+    assert!(matches!(alice_verdict.faults.as_slice(), [(_, SignatureFault::BatchHash)]), "{:?}", alice_verdict.faults);
+}
+
+#[test]
+fn a_batch_signer_that_one_files_thresholds_do_not_list_is_refused() {
+    let keys = [SignatoryKey::new(1, "root-1"), SignatoryKey::new(2, "root-2")];
+    let online = OnlineKey::new();
+    let root = message(&root_body(1, &[&keys[0], &keys[1]], &keys[0], &online));
+    let root = stage(&root, None, SystemTime::now()).expect("staged root");
+    let targets = stage(&message(&targets_body(&[], None)), None, SystemTime::now()).expect("staged targets");
+    let rebuild = Rebuild::Rebuilt(BTreeMap::new());
+    let signer = CountingSigner { key: &keys[1], calls: Mutex::new(Vec::new()) };
+    let refused = sign_ceremony(&root, None, &targets, &rebuild, &signer, Path::new("root-2")).expect_err("root-2 signs no targets");
+    assert!(matches!(&refused, CeremonyError::KeyNotListed { role } if role == "targets"), "{refused:?}");
+
+    let signer = CountingSigner { key: &keys[0], calls: Mutex::new(Vec::new()) };
+    let signed = sign_ceremony(&root, None, &targets, &rebuild, &signer, Path::new("root-1")).expect("root-1 signs both");
+    assert_eq!(*signer.calls.lock().expect("calls"), ["release-metadata-batch"]);
+    let entry = |file: &[u8]| serde_json::from_slice::<Value>(file).expect("json")["signatures"][0].clone();
+    assert_eq!(entry(&signed.root), entry(&signed.targets));
+}
+
+#[test]
+fn the_release_command_signs_three_files_with_one_call_to_ssh_keygen() {
+    let scratch = Scratch::new();
+    let alice = SignatoryKey::new(20, "alice");
+    let root_keys = [SignatoryKey::new(1, "root-1"), SignatoryKey::new(2, "root-2")];
+    let private = alice.private.to_openssh(LineEnding::LF).expect("private key file");
+    fs::write(scratch.path("alice"), private.as_bytes()).expect("key file");
+    fs::set_permissions(scratch.path("alice"), fs::Permissions::from_mode(0o600)).expect("private");
+    let calls = text(&scratch.path("calls"));
+    let signer = text(&script(&scratch, "ssh-keygen-recorded", &format!("printf '%s\\n' \"$*\" >> '{calls}'\nexec ssh-keygen \"$@\"\n")));
+    let root = alice_releases(&alice, &[&root_keys[0], &root_keys[1]]);
+    let trusted = text(&scratch.put("root.json", &envelope(&root, Vec::new())));
+    let audiences = json!({
+        "keys": listing(&[&alice.object], &[alice.id.as_str()]),
+        "roles": [{ "name": "fleet", "keyids": [alice.id], "threshold": 1, "terminating": true, "paths": ["fleet/*"] }],
+    });
+    let top = targets_body(&[], Some(audiences));
+    let delegator = text(&scratch.put("targets.json", &envelope(&top, vec![alice.signature(&message(&top))])));
+    let body = text(&scratch.put("fleet.body.json", &targets_body(&[PATH], None)));
+    let fleet = text(&scratch.path("fleet.json"));
+    assert!(scratch.run(&["stage", &body, &fleet, "--role", "fleet"]).status.success());
+    fs::write(scratch.path("rebuilt.tar"), ARTIFACT).expect("rebuild");
+    let rebuilt = format!("{PATH}={}", text(&scratch.path("rebuilt.tar")));
+    let (snapshot, timestamp) = (text(&scratch.path("snapshot.json")), text(&scratch.path("timestamp.json")));
+
+    let release = scratch.run(&[
+        "release", &fleet, "--trusted", &trusted, "--delegator", &delegator, "--targets", &delegator,
+        "--snapshot", &snapshot, "--timestamp", &timestamp, "--snapshot-expires-in", "7d",
+        "--timestamp-expires-in", "1d", "--key", &text(&scratch.path("alice")), "--signer", &signer, "--rebuilt", &rebuilt,
+    ]);
+    assert!(release.status.success(), "{}", stderr(&release));
+    assert_eq!(scratch.calls().len(), 1, "{:?}", scratch.calls());
+    assert!(scratch.calls()[0].starts_with("-Y sign -n release-metadata-batch -f "), "{:?}", scratch.calls());
+    assert!(stdout(&release).contains("fleet: 1 of 1 signatories count; met"), "{}", stdout(&release));
+
+    let read = |path: &str| fs::read(path).expect("written");
+    let fetched = Fetched {
+        roots: Vec::new(),
+        timestamp: read(&timestamp),
+        snapshot: read(&snapshot),
+        targets: BTreeMap::from([("targets".to_owned(), read(&delegator)), ("fleet".to_owned(), read(&fleet))]),
+    };
+    let hashes = BTreeMap::from([("sha256".to_owned(), hex::encode(Sha256::digest(ARTIFACT)))]);
+    let artifact = Artifact { length: ARTIFACT.len() as u64, hashes };
+    let trusted = TrustedState::from_root(read(&trusted));
+    let verified = verify(&trusted, &fetched, PATH, &artifact, SystemTime::now()).expect("the release verifies");
+    assert_eq!(verified.target.role, "fleet");
 }
 ```

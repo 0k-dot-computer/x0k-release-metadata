@@ -17,8 +17,9 @@ use ssh_key::private::Ed25519Keypair;
 use ssh_key::public::KeyData;
 use ssh_key::{HashAlg, LineEnding, PrivateKey, PublicKey, SshSig};
 use x0k_release_metadata::{
-    canonical_json, key_id, parse_utc, sign_snapshot, sign_timestamp, verify, Artifact, Fetched, Refusal, Signer,
-    SignerError, SignerProgram, TrustedState, Verified, NAMESPACE,
+    canonical_json, key_id, parse_utc, sign_ceremony, sign_release, sign_snapshot, sign_timestamp, stage, verify,
+    Artifact, CeremonyError, Fetched, Rebuild, Refusal, Release, SignatureFault, Signer, SignerError, SignerProgram,
+    TrustedState, Verified, BATCH_NAMESPACE, NAMESPACE,
 };
 
 const PROGRAM: &str = env!("CARGO_BIN_EXE_x0k-release-metadata");
@@ -47,7 +48,11 @@ impl SignatoryKey {
     }
 
     fn sshsig(&self, message: &[u8]) -> SshSig {
-        self.private.sign(NAMESPACE, HashAlg::Sha512, message).expect("sshsig")
+        self.sshsig_under(NAMESPACE, message)
+    }
+
+    fn sshsig_under(&self, namespace: &str, message: &[u8]) -> SshSig {
+        self.private.sign(namespace, HashAlg::Sha512, message).expect("sshsig")
     }
 
     fn signature(&self, message: &[u8]) -> Value {
@@ -116,6 +121,12 @@ impl Scratch {
         fs::write(&path, script).expect("stub signer");
         fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("executable");
         path
+    }
+
+    /// Prepares the stub's answer for `key` as a batch signature over `message`.
+    fn prepare_batch(&self, key: &SignatoryKey, message: &[u8]) {
+        let pem = key.sshsig_under(BATCH_NAMESPACE, message).to_pem(LineEnding::LF).expect("armor");
+        fs::write(self.path(&format!("{}.sig", key.name)), pem).expect("prepared signature");
     }
 
     fn calls(&self) -> Vec<String> {
@@ -697,4 +708,221 @@ fn a_signer_without_a_sink_prints_nothing() {
     assert!(child.status.success(), "{}", stderr(&child));
     assert!(stdout(&child).contains("1 passed"), "the child ran the signing: {}", stdout(&child));
     assert!(!stderr(&child).contains("Signing data on standard input"), "a quiet signer printed: {}", stderr(&child));
+}
+
+
+/// The statement a batch signature over `files` signs: each file's type,
+/// role, version and the SHA-256 of its body's canonical bytes.
+fn batch_statement(files: &[(&str, &str, &Value)]) -> Value {
+    let listed: Vec<Value> = files
+        .iter()
+        .map(|(kind, role, body)| {
+            let sha256 = hex::encode(Sha256::digest(message(body)));
+            json!({ "_type": kind, "role": role, "version": body["version"], "hashes": { "sha256": sha256 } })
+        })
+        .collect();
+    json!({ "_type": "release-metadata-batch", "files": listed })
+}
+
+fn signed_file(path: &Path) -> Value {
+    serde_json::from_slice(&fs::read(path).expect("signed file")).expect("json")
+}
+
+/// A reader that trusts `root` looks up the artifact in `targets`, under a
+/// snapshot and a timestamp that the online key signs.
+fn read_release(root: Vec<u8>, targets: BTreeMap<String, Vec<u8>>, online: &OnlineKey) -> Result<Verified, Refusal> {
+    let bytes = |value: &Value| serde_json::to_vec(value).expect("json");
+    let meta: Map<String, Value> = targets.keys().map(|role| (format!("{role}.json"), json!({ "version": 1 }))).collect();
+    let snapshot = json!({ "_type": "snapshot", "spec_version": "1.0.37", "version": 1, "expires": LATER, "meta": meta });
+    let snapshot = bytes(&envelope(&snapshot, vec![online.signature(&message(&snapshot))]));
+    let timestamp = json!({
+        "_type": "timestamp", "spec_version": "1.0.37", "version": 1, "expires": LATER,
+        "meta": { "snapshot.json": { "version": 1 } },
+    });
+    let timestamp = bytes(&envelope(&timestamp, vec![online.signature(&message(&timestamp))]));
+    let fetched = Fetched { roots: Vec::new(), timestamp, snapshot, targets };
+    let hashes = BTreeMap::from([("sha256".to_owned(), hex::encode(Sha256::digest(ARTIFACT)))]);
+    let artifact = Artifact { length: ARTIFACT.len() as u64, hashes };
+    verify(&TrustedState::from_root(root), &fetched, PATH, &artifact, parse_utc(NOW).expect("now"))
+}
+
+#[test]
+fn a_root_and_its_targets_file_are_signed_with_one_call() {
+    let scratch = Scratch::new();
+    let keys = [SignatoryKey::new(1, "root-1"), SignatoryKey::new(2, "root-2")];
+    let online = OnlineKey::new();
+    let root = root_body(1, &[&keys[0], &keys[1]], &keys[0], &online);
+    let targets = targets_body(&[PATH], None);
+    let (root_path, targets_path) = (scratch.path("1.root.json"), scratch.path("targets.json"));
+    for (body, staged) in [(&root, &root_path), (&targets, &targets_path)] {
+        let body = text(&scratch.put("body.json", body));
+        assert!(scratch.run(&["stage", &body, &text(staged)]).status.success());
+    }
+    fs::write(scratch.path("rebuilt.tar"), ARTIFACT).expect("rebuild");
+    let statement = batch_statement(&[("root", "root", &root), ("targets", "targets", &targets)]);
+    let signer = text(&scratch.stub_signer(&[&keys[1]], &message(&root)));
+    scratch.prepare_batch(&keys[0], &message(&statement));
+    let rebuilt = format!("{PATH}={}", text(&scratch.path("rebuilt.tar")));
+    let (root_text, targets_text) = (text(&root_path), text(&targets_path));
+
+    let key = text(&scratch.path("root-1"));
+    let both = scratch.run(&["sign", &root_text, &targets_text, "--key", &key, "--signer", &signer, "--rebuilt", &rebuilt]);
+    assert!(both.status.success(), "{}", stderr(&both));
+    assert_eq!(scratch.calls(), vec![format!("-Y sign -n release-metadata-batch -f {key}")]);
+    assert_eq!(fs::read(scratch.path("message")).expect("recorded message"), message(&statement));
+    for path in [&root_path, &targets_path] {
+        let entry = &signed_file(path)["signatures"][0];
+        assert_eq!((&entry["keyid"], &entry["x-release-metadata-batch"]), (&json!(keys[0].id), &statement), "{}", path.display());
+    }
+    let shown = stdout(&both);
+    assert!(shown.contains(&format!("{root_text}:\nroot version 1: 1 of 2 signatories count; missing root-2")), "{shown}");
+    assert!(shown.contains(&format!("{targets_text}:\ntargets: 1 of 1 signatories count; met")), "{shown}");
+
+    let second = scratch.run(&["sign", &root_text, "--key", &text(&scratch.path("root-2")), "--signer", &signer]);
+    assert!(second.status.success(), "{}", stderr(&second));
+    let signed_root = fs::read(&root_path).expect("root");
+    let files = BTreeMap::from([("targets".to_owned(), fs::read(&targets_path).expect("targets"))]);
+    let verified = read_release(signed_root, files, &online).expect("a reader starts from the root and reads its targets");
+    assert_eq!(verified.target.role, "targets");
+}
+
+/// A signer that signs in process and records the namespace of each call.
+struct CountingSigner<'a> {
+    key: &'a SignatoryKey,
+    calls: Mutex<Vec<String>>,
+}
+
+impl Signer for CountingSigner<'_> {
+    fn sign(&self, key: &Path, namespace: &str, message: &[u8]) -> Result<Vec<u8>, SignerError> {
+        self.calls.lock().expect("calls").push(namespace.to_owned());
+        InProcessSigner(self.key).sign(key, namespace, message)
+    }
+}
+
+/// A root whose targets, snapshot and timestamp roles are Alice's one key.
+fn alice_releases(alice: &SignatoryKey, root_keys: &[&SignatoryKey]) -> Value {
+    let mut keys: Map<String, Value> = root_keys.iter().map(|k| (k.id.clone(), k.object.clone())).collect();
+    keys.insert(alice.id.clone(), alice.object.clone());
+    let root_ids: Vec<&str> = root_keys.iter().map(|k| k.id.as_str()).collect();
+    json!({
+        "_type": "root", "spec_version": "1.0.37", "consistent_snapshot": false,
+        "version": 1, "expires": LATER, "keys": keys,
+        "roles": {
+            "root": { "keyids": root_ids, "threshold": 2 },
+            "timestamp": { "keyids": [alice.id], "threshold": 1 },
+            "snapshot": { "keyids": [alice.id], "threshold": 1 },
+            "targets": { "keyids": [alice.id], "threshold": 1 },
+        },
+    })
+}
+
+#[test]
+fn a_release_is_signed_with_one_call_and_lists_its_files_by_version() {
+    let alice = SignatoryKey::new(20, "alice");
+    let root_keys = [SignatoryKey::new(1, "root-1"), SignatoryKey::new(2, "root-2")];
+    let root = serde_json::to_vec(&envelope(&alice_releases(&alice, &[&root_keys[0], &root_keys[1]]), Vec::new())).expect("root");
+    let staged = stage(&message(&targets_body(&[PATH], None)), None, SystemTime::now()).expect("staged targets");
+    let signer = CountingSigner { key: &alice, calls: Mutex::new(Vec::new()) };
+    let rebuild = Rebuild::Rebuilt(BTreeMap::from([(PATH.to_owned(), ARTIFACT.to_vec())]));
+    let (listed, later) = (BTreeMap::new(), SystemTime::now() + hours(24));
+    let release = Release {
+        root: &root, role: "targets", staged: &staged, delegator: None, rebuild: &rebuild, listed: &listed,
+        previous_snapshot: None, previous_timestamp: None, snapshot_expires: later, timestamp_expires: later,
+    };
+    let signed = sign_release(&release, &signer, Path::new("alice")).expect("the release signs");
+    assert_eq!(*signer.calls.lock().expect("calls"), ["release-metadata-batch"]);
+    let (snapshot, timestamp): (Value, Value) =
+        (serde_json::from_slice(&signed.snapshot).expect("json"), serde_json::from_slice(&signed.timestamp).expect("json"));
+    assert_eq!(snapshot["signed"]["meta"], json!({ "targets.json": { "version": 1 } }));
+    assert_eq!(timestamp["signed"]["meta"], json!({ "snapshot.json": { "version": 1 } }));
+
+    let fetch = |targets: Vec<u8>| Fetched {
+        roots: Vec::new(),
+        timestamp: signed.timestamp.clone(),
+        snapshot: signed.snapshot.clone(),
+        targets: BTreeMap::from([("targets".to_owned(), targets)]),
+    };
+    let hashes = BTreeMap::from([("sha256".to_owned(), hex::encode(Sha256::digest(ARTIFACT)))]);
+    let artifact = Artifact { length: ARTIFACT.len() as u64, hashes };
+    let trusted = TrustedState::from_root(root.clone());
+    let verified = verify(&trusted, &fetch(signed.targets.clone()), PATH, &artifact, SystemTime::now()).expect("verifies");
+    assert_eq!(verified.target.role, "targets");
+
+    // Another targets file of the same version, carrying the release's
+    // signature, is refused: the statement names the real body's hash.
+    let mut other: Value = serde_json::from_slice(&signed.targets).expect("json");
+    other["signed"]["targets"]["fleet/chariot-6.6.tar"] = other["signed"]["targets"][PATH].clone();
+    let refusal = verify(&trusted, &fetch(serde_json::to_vec(&other).expect("json")), PATH, &artifact, SystemTime::now())
+        .expect_err("a substituted file of the same version");
+    assert_eq!((refusal.role.as_str(), refusal.rule.code()), ("targets", "threshold"));
+    let alice_verdict = refusal.signatories.iter().find(|v| v.signatory == "alice").expect("alice named");
+    assert!(matches!(alice_verdict.faults.as_slice(), [(_, SignatureFault::BatchHash)]), "{:?}", alice_verdict.faults);
+}
+
+#[test]
+fn a_batch_signer_that_one_files_thresholds_do_not_list_is_refused() {
+    let keys = [SignatoryKey::new(1, "root-1"), SignatoryKey::new(2, "root-2")];
+    let online = OnlineKey::new();
+    let root = message(&root_body(1, &[&keys[0], &keys[1]], &keys[0], &online));
+    let root = stage(&root, None, SystemTime::now()).expect("staged root");
+    let targets = stage(&message(&targets_body(&[], None)), None, SystemTime::now()).expect("staged targets");
+    let rebuild = Rebuild::Rebuilt(BTreeMap::new());
+    let signer = CountingSigner { key: &keys[1], calls: Mutex::new(Vec::new()) };
+    let refused = sign_ceremony(&root, None, &targets, &rebuild, &signer, Path::new("root-2")).expect_err("root-2 signs no targets");
+    assert!(matches!(&refused, CeremonyError::KeyNotListed { role } if role == "targets"), "{refused:?}");
+
+    let signer = CountingSigner { key: &keys[0], calls: Mutex::new(Vec::new()) };
+    let signed = sign_ceremony(&root, None, &targets, &rebuild, &signer, Path::new("root-1")).expect("root-1 signs both");
+    assert_eq!(*signer.calls.lock().expect("calls"), ["release-metadata-batch"]);
+    let entry = |file: &[u8]| serde_json::from_slice::<Value>(file).expect("json")["signatures"][0].clone();
+    assert_eq!(entry(&signed.root), entry(&signed.targets));
+}
+
+#[test]
+fn the_release_command_signs_three_files_with_one_call_to_ssh_keygen() {
+    let scratch = Scratch::new();
+    let alice = SignatoryKey::new(20, "alice");
+    let root_keys = [SignatoryKey::new(1, "root-1"), SignatoryKey::new(2, "root-2")];
+    let private = alice.private.to_openssh(LineEnding::LF).expect("private key file");
+    fs::write(scratch.path("alice"), private.as_bytes()).expect("key file");
+    fs::set_permissions(scratch.path("alice"), fs::Permissions::from_mode(0o600)).expect("private");
+    let calls = text(&scratch.path("calls"));
+    let signer = text(&script(&scratch, "ssh-keygen-recorded", &format!("printf '%s\\n' \"$*\" >> '{calls}'\nexec ssh-keygen \"$@\"\n")));
+    let root = alice_releases(&alice, &[&root_keys[0], &root_keys[1]]);
+    let trusted = text(&scratch.put("root.json", &envelope(&root, Vec::new())));
+    let audiences = json!({
+        "keys": listing(&[&alice.object], &[alice.id.as_str()]),
+        "roles": [{ "name": "fleet", "keyids": [alice.id], "threshold": 1, "terminating": true, "paths": ["fleet/*"] }],
+    });
+    let top = targets_body(&[], Some(audiences));
+    let delegator = text(&scratch.put("targets.json", &envelope(&top, vec![alice.signature(&message(&top))])));
+    let body = text(&scratch.put("fleet.body.json", &targets_body(&[PATH], None)));
+    let fleet = text(&scratch.path("fleet.json"));
+    assert!(scratch.run(&["stage", &body, &fleet, "--role", "fleet"]).status.success());
+    fs::write(scratch.path("rebuilt.tar"), ARTIFACT).expect("rebuild");
+    let rebuilt = format!("{PATH}={}", text(&scratch.path("rebuilt.tar")));
+    let (snapshot, timestamp) = (text(&scratch.path("snapshot.json")), text(&scratch.path("timestamp.json")));
+
+    let release = scratch.run(&[
+        "release", &fleet, "--trusted", &trusted, "--delegator", &delegator, "--targets", &delegator,
+        "--snapshot", &snapshot, "--timestamp", &timestamp, "--snapshot-expires-in", "7d",
+        "--timestamp-expires-in", "1d", "--key", &text(&scratch.path("alice")), "--signer", &signer, "--rebuilt", &rebuilt,
+    ]);
+    assert!(release.status.success(), "{}", stderr(&release));
+    assert_eq!(scratch.calls().len(), 1, "{:?}", scratch.calls());
+    assert!(scratch.calls()[0].starts_with("-Y sign -n release-metadata-batch -f "), "{:?}", scratch.calls());
+    assert!(stdout(&release).contains("fleet: 1 of 1 signatories count; met"), "{}", stdout(&release));
+
+    let read = |path: &str| fs::read(path).expect("written");
+    let fetched = Fetched {
+        roots: Vec::new(),
+        timestamp: read(&timestamp),
+        snapshot: read(&snapshot),
+        targets: BTreeMap::from([("targets".to_owned(), read(&delegator)), ("fleet".to_owned(), read(&fleet))]),
+    };
+    let hashes = BTreeMap::from([("sha256".to_owned(), hex::encode(Sha256::digest(ARTIFACT)))]);
+    let artifact = Artifact { length: ARTIFACT.len() as u64, hashes };
+    let trusted = TrustedState::from_root(read(&trusted));
+    let verified = verify(&trusted, &fetched, PATH, &artifact, SystemTime::now()).expect("the release verifies");
+    assert_eq!(verified.target.role, "fleet");
 }

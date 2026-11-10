@@ -27,6 +27,9 @@ pub fn key_id(key: &Value) -> Result<String, Malformed> {
 pub(crate) struct Signature {
     pub keyid: String,
     pub sig: String,
+    /// The statement a batch signature signs; absent for a single signature.
+    #[serde(default, rename = "x-release-metadata-batch", skip_serializing_if = "Option::is_none")]
+    pub batch: Option<Value>,
 }
 
 /// A metadata file as read off the wire.
@@ -34,6 +37,20 @@ pub(crate) struct Envelope<T> {
     pub body: T,
     pub canonical: Vec<u8>,
     pub signatures: Vec<Signature>,
+}
+
+/// What one file's signatures must cover: its kind, its version and its body.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Covered<'a> {
+    pub kind: &'a str,
+    pub version: u64,
+    pub canonical: &'a [u8],
+}
+
+impl<T: Typed> Envelope<T> {
+    pub(crate) fn covered(&self) -> Covered<'_> {
+        Covered { kind: T::TYPE, version: self.body.version(), canonical: &self.canonical }
+    }
 }
 
 #[derive(Deserialize)]
